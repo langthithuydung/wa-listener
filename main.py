@@ -14,7 +14,7 @@ from telethon import TelegramClient, events
 import uvicorn
 import threading
 
-from parser import parse_message
+from alpha_parser import parse_message
 from storage import save_event, refresh_r2_snapshot
 
 # ── Config ──────────────────────────────────────────
