@@ -45,6 +45,45 @@ def root():
 def head_root():
     return Response(status_code=200)
 
+# ===========================
+# TEST ENDPOINT
+# ===========================
+
+@app.get("/test")
+def test():
+    text = """
+Join the 47 Exclusive TGE on #Binance Wallet with
+Cap (CAP) via PancakeSwap!
+
+⏰ Subscription Period: June 26, 2026 | 10:00 AM-12:00 PM (UTC)
+🗓 Please get ready to claim the token and start trading at 12:00 (UTC)
+📜 Eligible users need to use Binance Alpha Points to participate
+
+TGE details and the Event Portal will be released soon — stay tuned!
+"""
+
+    print("=" * 80)
+    print("[TEST] Running parser...")
+
+    parsed = parse_message(text)
+
+    print("[PARSED]", parsed)
+
+    if parsed:
+        save_event(
+            parsed=parsed,
+            raw_text=text,
+            source_channel="binance_wallet_announcements",
+            msg_id=999999999
+        )
+
+        print("[TEST] Saved to Supabase + R2")
+
+    return {
+        "success": True,
+        "parsed": parsed
+    }
+
 # ── Telegram Listener ────────────────────────────────
 client = TelegramClient("session_wave_alpha", API_ID, API_HASH)
 
