@@ -2,11 +2,14 @@ import asyncio
 import os
 from dotenv import load_dotenv
 load_dotenv()
+
 import base64
 
-if os.getenv("SESSION_BASE64") and not os.path.exists("session_wave_alpha.session"):
+session_b64 = os.getenv("SESSION_BASE64")
+if session_b64 and not os.path.exists("session_wave_alpha.session"):
     with open("session_wave_alpha.session", "wb") as f:
-        f.write(base64.b64decode(os.getenv("SESSION_BASE64")))
+        f.write(base64.b64decode(session_b64))
+
 from fastapi import FastAPI
 from telethon import TelegramClient, events
 import uvicorn
