@@ -3,7 +3,7 @@ import json
 import boto3
 from botocore.config import Config
 from supabase import create_client
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 
 # ── Supabase ─────────────────────────────────────────
 supabase = create_client(
@@ -23,42 +23,100 @@ def get_r2_client():
 
 BUCKET = os.getenv("R2_BUCKET_NAME")
 
-# ── Lưu event mới vào Supabase ───────────────────────
-def save_event(parsed: dict, raw_text: str, source_channel: str, msg_id: int):
-    symbol = parsed.get("symbol") or None
 
-    # Dedupe: có symbol → check trùng theo symbol
+def _find_pending_match(parsed: dict) -> dict | None:
+    """
+    Tìm row 'pending' trong 48h gần nhất có thể match với tin mới.
+    Match khi: cùng event_type VÀ (cùng points_threshold HOẶC tin mới có symbol).
+    """
+    try:
+        cutoff = (datetime.now(timezone.utc) - timedelta(hours=48)).isoformat()
+        rows = supabase.table("alpha_events") \
+            .select("*") \
+            .eq("status", "pending") \
+            .gte("created_at", cutoff) \
+            .order("created_at", desc=True) \
+            .execute().data
+
+        if not rows:
+            return None
+
+        event_type = parsed.get("event_type")
+        points     = parsed.get("points_threshold")
+        symbol     = parsed.get("symbol")
+
+        for row in rows:
+            # Phải cùng event_type
+            if row.get("event_type") != event_type:
+                continue
+            # Match nếu: tin mới có symbol (Binance vừa công bố)
+            # HOẶC cùng points_threshold
+            if symbol or (points and row.get("points_threshold") == points):
+                return row
+
+        return None
+    except Exception as e:
+        print(f"[storage] find_pending error: {e}")
+        return None
+
+
+def save_event(parsed: dict, raw_text: str, source_channel: str, msg_id: int):
+    symbol     = parsed.get("symbol") or None
+    event_type = parsed.get("event_type")
+
+    # ── Bước 1: Nếu có symbol → thử update row pending trước ──
+    if symbol:
+        pending_row = _find_pending_match(parsed)
+        if pending_row:
+            try:
+                update_data = {
+                    "symbol":           symbol,
+                    "project_name":     parsed.get("project_name") or pending_row.get("project_name"),
+                    "points_threshold": parsed.get("points_threshold") or pending_row.get("points_threshold"),
+                    "amount_per_user":  parsed.get("amount_per_user") or pending_row.get("amount_per_user"),
+                    "decay_rule":       parsed.get("decay_rule") or pending_row.get("decay_rule"),
+                    "event_time":       parsed.get("event_time_utc") or pending_row.get("event_time"),
+                    "status":           "upcoming",
+                    "source_msg_id":    msg_id,
+                    "raw_text":         raw_text,
+                }
+                supabase.table("alpha_events") \
+                    .update(update_data) \
+                    .eq("id", pending_row["id"]) \
+                    .execute()
+                print(f"[storage] Updated pending→upcoming: id={pending_row['id']} symbol={symbol} ✓")
+                refresh_r2_snapshot()
+                return
+            except Exception as e:
+                print(f"[storage] Update pending error: {e}")
+
+    # ── Bước 2: Dedupe trước khi insert mới ──────────────────
     if symbol:
         try:
             existing = supabase.table("alpha_events") \
-                .select("id") \
-                .eq("symbol", symbol) \
-                .execute()
+                .select("id").eq("symbol", symbol).execute()
             if existing.data:
                 print(f"[storage] Skip duplicate symbol: {symbol}")
                 return
         except Exception as e:
             print(f"[storage] Dedupe check error: {e}")
     else:
-        # Không có symbol → check trùng theo source_msg_id
         try:
             existing = supabase.table("alpha_events") \
-                .select("id") \
-                .eq("source_msg_id", msg_id) \
-                .execute()
+                .select("id").eq("source_msg_id", msg_id).execute()
             if existing.data:
                 print(f"[storage] Skip duplicate msg_id: {msg_id}")
                 return
         except Exception as e:
             print(f"[storage] Dedupe check error: {e}")
 
-    # Status: chưa có symbol → "pending" (chờ Binance công bố token)
+    # ── Bước 3: Insert mới ───────────────────────────────────
     status = "upcoming" if symbol else "pending"
 
     data = {
         "project_name":     parsed.get("project_name"),
         "symbol":           symbol,
-        "event_type":       parsed.get("event_type"),
+        "event_type":       event_type,
         "points_threshold": parsed.get("points_threshold"),
         "amount_per_user":  parsed.get("amount_per_user"),
         "decay_rule":       parsed.get("decay_rule"),
@@ -72,7 +130,7 @@ def save_event(parsed: dict, raw_text: str, source_channel: str, msg_id: int):
 
     try:
         supabase.table("alpha_events").insert(data).execute()
-        print(f"[storage] Saved: symbol={symbol or 'TBA'}, status={status} → Supabase ✓")
+        print(f"[storage] Inserted: symbol={symbol or 'TBA'}, status={status} ✓")
         refresh_r2_snapshot()
     except Exception as e:
         print(f"[storage] Insert error: {e}")
@@ -110,9 +168,7 @@ def refresh_r2_snapshot():
                 CacheControl='max-age=60'
             )
 
-        print(f"[storage] R2 snapshot updated — "
-              f"pending={len(pending)}, upcoming={len(upcoming)}, "
-              f"live={len(live)}, ended={len(history)} ✓")
+        print(f"[storage] R2 updated — pending={len(pending)}, upcoming={len(upcoming)}, live={len(live)}, ended={len(history)} ✓")
 
     except Exception as e:
         print(f"[storage] R2 error: {e}")
