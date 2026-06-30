@@ -4,7 +4,7 @@ import re
 import urllib.request
 import urllib.error
 
-MODEL_NAME = "gemini-3.1-flash-lite"
+MODEL_NAME = "gemini-2.0-flash-lite"
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
 KEYWORDS = [
@@ -19,18 +19,30 @@ def is_relevant(text: str) -> bool:
 def parse_with_regex(text: str) -> dict:
     result = {}
 
+    # Symbol: (CAP) hoặc $CAP
     symbol = re.search(r'\(([A-Z]{2,10})\)|\$([A-Z]{2,10})', text)
     if symbol:
         result["symbol"] = symbol.group(1) or symbol.group(2)
 
-    points = re.search(r'(\d+)\s*alpha\s*points?', text, re.IGNORECASE)
+    # Points: "224 Binance Alpha Points" hoặc "100 Alpha Points"
+    points = re.search(
+        r'(\d+)\s*(?:binance\s*)?alpha\s*points?',
+        text,
+        re.IGNORECASE
+    )
     if points:
         result["points_threshold"] = int(points.group(1))
 
-    amount = re.search(r'(\d+[\d,]*\.?\d*)\s*(tokens?|coins?)\s*per\s*user', text, re.IGNORECASE)
+    # Amount per user
+    amount = re.search(
+        r'(\d+[\d,]*\.?\d*)\s*(?:tokens?|coins?)\s*per\s*user',
+        text,
+        re.IGNORECASE
+    )
     if amount:
         result["amount_per_user"] = float(amount.group(1).replace(",", ""))
 
+    # Event type
     lower = text.lower()
     if "tge" in lower or "token generation" in lower:
         result["event_type"] = "tge"
@@ -58,7 +70,7 @@ Return ONLY valid JSON, no explanation, no markdown.
 
 Fields:
 - project_name (string or null)
-- symbol (string or null)
+- symbol (string or null — null if not mentioned yet)
 - event_type (string: "airdrop" or "tge" or null)
 - amount_per_user (number or null)
 - points_threshold (number or null)
@@ -117,11 +129,15 @@ def parse_message(text: str) -> dict | None:
     )
 
     if missing:
-        print("[Parser] Missing fields -> use Gemini")
+        print("[Parser] Missing fields → use Gemini")
         gemini_result = parse_with_gemini(text)
+        # Regex result ưu tiên hơn Gemini (regex chính xác hơn)
         result = {**gemini_result, **result}
 
-    if not result.get("symbol"):
+    # Bắt buộc phải có event_type để biết đây là airdrop hay TGE
+    # Symbol có thể null (Binance chưa công bố token)
+    if not result.get("event_type"):
+        print("[Parser] Bỏ qua: không xác định được event_type")
         return None
 
     return result
