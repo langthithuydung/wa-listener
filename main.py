@@ -2,6 +2,7 @@ import asyncio
 import os
 import traceback
 import time
+import random
 from dotenv import load_dotenv
 load_dotenv()
 
@@ -28,7 +29,7 @@ CHANNELS = [
     "binance_announcements",         # Priority 2
 ]
 
-# ── FastAPI (để Render không kill service) ──────────
+# ── FastAPI ──────────────────────────────────────────
 app = FastAPI()
 
 @app.get("/health")
@@ -47,17 +48,14 @@ def root():
 def head_root():
     return Response(status_code=200)
 
-# ── Telegram status (để debug) ──────────────────────
+# ── Telegram status (để debug) ───────────────────────
 telegram_status = {"connected": False, "last_error": None, "restarts": 0}
 
 @app.get("/telegram-status")
 def tg_status():
     return telegram_status
 
-# ===========================
-# TEST ENDPOINT
-# ===========================
-
+# ── Test endpoint ────────────────────────────────────
 @app.get("/test")
 def test():
     text = """
@@ -72,17 +70,17 @@ for the specific airdrop tokens and the latest updates.
     print("[TEST] Running parser...")
 
     parsed = parse_message(text)
-
     print("[PARSED]", parsed)
 
     if parsed:
+        test_msg_id = random.randint(100000000, 999999998)
         save_event(
             parsed=parsed,
             raw_text=text,
             source_channel="binance_wallet_announcements",
-            msg_id=999999999
+            msg_id=test_msg_id
         )
-        print("[TEST] Saved to Supabase + R2")
+        print(f"[TEST] Saved to Supabase + R2 (msg_id={test_msg_id})")
 
     return {
         "success": parsed is not None,
@@ -112,7 +110,6 @@ async def on_message(event):
         print("[skip] Không liên quan đến Alpha hoặc thiếu event_type")
 
 async def start_telegram():
-    """Khởi động Telegram listener"""
     await client.start(phone=os.getenv("TELEGRAM_PHONE"))
     telegram_status["connected"] = True
     telegram_status["last_error"] = None
@@ -121,7 +118,6 @@ async def start_telegram():
     await client.run_until_disconnected()
 
 def run_telegram_in_thread():
-    """Chạy Telegram với auto-restart khi crash"""
     while True:
         try:
             print(f"[Telegram] Starting... (attempt #{telegram_status['restarts'] + 1})")
@@ -139,10 +135,8 @@ def run_telegram_in_thread():
 
 # ── Start ────────────────────────────────────────────
 if __name__ == "__main__":
-    # Chạy Telegram listener trong background thread
     tg_thread = threading.Thread(target=run_telegram_in_thread, daemon=True)
     tg_thread.start()
 
-    # Chạy FastAPI trên main thread
     port = int(os.getenv("PORT", 8000))
     uvicorn.run(app, host="0.0.0.0", port=port)
