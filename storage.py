@@ -46,11 +46,8 @@ def _find_pending_match(parsed: dict) -> dict | None:
         symbol     = parsed.get("symbol")
 
         for row in rows:
-            # Phải cùng event_type
             if row.get("event_type") != event_type:
                 continue
-            # Match nếu: tin mới có symbol (Binance vừa công bố)
-            # HOẶC cùng points_threshold
             if symbol or (points and row.get("points_threshold") == points):
                 return row
 
@@ -64,7 +61,7 @@ def save_event(parsed: dict, raw_text: str, source_channel: str, msg_id: int):
     symbol     = parsed.get("symbol") or None
     event_type = parsed.get("event_type")
 
-    # ── Bước 1: Nếu có symbol → thử update row pending trước ──
+    # ── Bước 1: Nếu có symbol → thử update row pending trước ─────────
     if symbol:
         pending_row = _find_pending_match(parsed)
         if pending_row:
@@ -73,9 +70,19 @@ def save_event(parsed: dict, raw_text: str, source_channel: str, msg_id: int):
                     "symbol":           symbol,
                     "project_name":     parsed.get("project_name") or pending_row.get("project_name"),
                     "points_threshold": parsed.get("points_threshold") or pending_row.get("points_threshold"),
+                    "points_cost":      parsed.get("points_cost") or pending_row.get("points_cost"),
                     "amount_per_user":  parsed.get("amount_per_user") or pending_row.get("amount_per_user"),
+                    "total_amount":     parsed.get("total_amount") or pending_row.get("total_amount"),
                     "decay_rule":       parsed.get("decay_rule") or pending_row.get("decay_rule"),
                     "event_time":       parsed.get("event_time_utc") or pending_row.get("event_time"),
+                    "chain_id":         parsed.get("chain_id") or pending_row.get("chain_id") or "56",
+                    "chain_name":       parsed.get("chain_name") or pending_row.get("chain_name") or "BSC",
+                    "fdv":              parsed.get("fdv") or pending_row.get("fdv"),
+                    "phase":            parsed.get("phase") or pending_row.get("phase"),
+                    "spot_listed":      parsed.get("spot_listed") or pending_row.get("spot_listed") or False,
+                    "futures_listed":   parsed.get("futures_listed") or pending_row.get("futures_listed") or False,
+                    "completed":        parsed.get("completed") or pending_row.get("completed") or False,
+                    "pretge":           parsed.get("pretge") or pending_row.get("pretge") or False,
                     "status":           "upcoming",
                     "source_msg_id":    msg_id,
                     "raw_text":         raw_text,
@@ -90,7 +97,7 @@ def save_event(parsed: dict, raw_text: str, source_channel: str, msg_id: int):
             except Exception as e:
                 print(f"[storage] Update pending error: {e}")
 
-    # ── Bước 2: Dedupe trước khi insert mới ──────────────────
+    # ── Bước 2: Dedupe trước khi insert mới ──────────────────────────
     if symbol:
         try:
             existing = supabase.table("alpha_events") \
@@ -110,22 +117,36 @@ def save_event(parsed: dict, raw_text: str, source_channel: str, msg_id: int):
         except Exception as e:
             print(f"[storage] Dedupe check error: {e}")
 
-    # ── Bước 3: Insert mới ───────────────────────────────────
+    # ── Bước 3: Insert mới ───────────────────────────────────────────
     status = "upcoming" if symbol else "pending"
 
     data = {
-        "project_name":     parsed.get("project_name"),
-        "symbol":           symbol,
-        "event_type":       event_type,
+        "project_name":   parsed.get("project_name"),
+        "symbol":         symbol,
+        "event_type":     event_type,
         "points_threshold": parsed.get("points_threshold"),
-        "amount_per_user":  parsed.get("amount_per_user"),
-        "decay_rule":       parsed.get("decay_rule"),
-        "event_time":       parsed.get("event_time_utc"),
-        "status":           status,
-        "source_channel":   source_channel,
-        "source_msg_id":    msg_id,
-        "raw_text":         raw_text,
-        "created_at":       datetime.now(timezone.utc).isoformat()
+        "points_cost":    parsed.get("points_cost"),
+        "amount_per_user": parsed.get("amount_per_user"),
+        "total_amount":   parsed.get("total_amount"),
+        "decay_rule":     parsed.get("decay_rule"),
+        "event_time":     parsed.get("event_time_utc"),
+        "chain_id":       parsed.get("chain_id") or "56",
+        "chain_name":     parsed.get("chain_name") or "BSC",
+        "contract_address": parsed.get("contract_address"),
+        "fdv":            parsed.get("fdv"),
+        "price_snapshot": parsed.get("price_snapshot"),
+        "value_usd":      parsed.get("value_usd"),
+        "market_cap":     parsed.get("market_cap"),
+        "phase":          parsed.get("phase"),
+        "spot_listed":    parsed.get("spot_listed") or False,
+        "futures_listed": parsed.get("futures_listed") or False,
+        "completed":      parsed.get("completed") or False,
+        "pretge":         parsed.get("pretge") or False,
+        "status":         status,
+        "source_channel": source_channel,
+        "source_msg_id":  msg_id,
+        "raw_text":       raw_text,
+        "created_at":     datetime.now(timezone.utc).isoformat()
     }
 
     try:
@@ -149,8 +170,7 @@ def refresh_r2_snapshot():
         upcoming = [e for e in all_events if e["status"] == "upcoming"]
         live     = [e for e in all_events if e["status"] == "live"]
 
-        # KHÔNG ghi đè history.json — file đó do sync_alpha_history.py quản lý
-        # KHÔNG ghi đè all.json — để tránh xóa mất data lịch sử từ GitHub Actions
+        # KHÔNG ghi đè history.json — do sync_alpha_history.py quản lý
         files = {
             "alpha-events/pending.json":  pending,
             "alpha-events/upcoming.json": upcoming,
