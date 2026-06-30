@@ -16,13 +16,23 @@ def is_relevant(text: str) -> bool:
     text_lower = text.lower()
     return any(kw in text_lower for kw in KEYWORDS)
 
+
+# Các từ viết hoa trong ngoặc KHÔNG phải token symbol
+SYMBOL_BLACKLIST = {
+    "UTC", "TGE", "AM", "PM", "GMT", "USD", "USDT", "USDC", "BNB",
+    "CEO", "API", "URL", "FAQ", "TBA", "TBD", "ID", "VIP", "KYC",
+    "AML", "DEX", "CEX", "NFT", "DAO", "DeFi", "P2P", "OTC",
+}
+
 def parse_with_regex(text: str) -> dict:
     result = {}
 
-    # Symbol: (CAP) hoặc $CAP
-    symbol = re.search(r'\(([A-Z]{2,10})\)|\$([A-Z]{2,10})', text)
-    if symbol:
-        result["symbol"] = symbol.group(1) or symbol.group(2)
+    # Symbol: (CAP) hoặc $CAP — bỏ qua các từ trong blacklist
+    for m in re.finditer(r'\(([A-Z]{2,10})\)|\$([A-Z]{2,10})', text):
+        candidate = m.group(1) or m.group(2)
+        if candidate not in SYMBOL_BLACKLIST:
+            result["symbol"] = candidate
+            break
 
     # Points: "224 Binance Alpha Points" hoặc "100 Alpha Points"
     points = re.search(
