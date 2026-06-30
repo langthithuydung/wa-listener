@@ -148,17 +148,16 @@ def refresh_r2_snapshot():
         pending  = [e for e in all_events if e["status"] == "pending"]
         upcoming = [e for e in all_events if e["status"] == "upcoming"]
         live     = [e for e in all_events if e["status"] == "live"]
-        history  = [e for e in all_events if e["status"] == "ended"]
 
+        # KHÔNG ghi đè history.json — file đó do sync_alpha_history.py quản lý
+        # KHÔNG ghi đè all.json — để tránh xóa mất data lịch sử từ GitHub Actions
         files = {
             "alpha-events/pending.json":  pending,
             "alpha-events/upcoming.json": upcoming,
             "alpha-events/live.json":     live,
-            "alpha-events/history.json":  history,
-            "alpha-events/all.json":      all_events,
         }
 
-        for key, data in files.items():
+        def put(key, data):
             r2.put_object(
                 Bucket=BUCKET,
                 Key=key,
@@ -168,7 +167,10 @@ def refresh_r2_snapshot():
                 CacheControl='max-age=60'
             )
 
-        print(f"[storage] R2 updated — pending={len(pending)}, upcoming={len(upcoming)}, live={len(live)}, ended={len(history)} ✓")
+        for key, data in files.items():
+            put(key, data)
+
+        print(f"[storage] R2 updated — pending={len(pending)}, upcoming={len(upcoming)}, live={len(live)} ✓")
 
     except Exception as e:
         print(f"[storage] R2 error: {e}")
