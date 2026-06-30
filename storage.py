@@ -11,7 +11,7 @@ supabase = create_client(
     os.getenv("SUPABASE_KEY")
 )
 
-# ── R2 — dùng cùng pattern với fetch_alpha.py ────────
+# ── R2 ───────────────────────────────────────────────
 def get_r2_client():
     return boto3.client(
         's3',
@@ -25,22 +25,35 @@ BUCKET = os.getenv("R2_BUCKET_NAME")
 
 # ── Lưu event mới vào Supabase ───────────────────────
 def save_event(parsed: dict, raw_text: str, source_channel: str, msg_id: int):
-    symbol = parsed.get("symbol", "")
-    if not symbol:
-        print("[storage] Bỏ qua: không có symbol")
-        return
+    symbol = parsed.get("symbol") or None
 
-    # Dedupe: bỏ qua nếu symbol đã tồn tại
-    try:
-        existing = supabase.table("alpha_events") \
-            .select("id") \
-            .eq("symbol", symbol) \
-            .execute()
-        if existing.data:
-            print(f"[storage] Skip duplicate: {symbol}")
-            return
-    except Exception as e:
-        print(f"[storage] Dedupe check error: {e}")
+    # Dedupe: có symbol → check trùng theo symbol
+    if symbol:
+        try:
+            existing = supabase.table("alpha_events") \
+                .select("id") \
+                .eq("symbol", symbol) \
+                .execute()
+            if existing.data:
+                print(f"[storage] Skip duplicate symbol: {symbol}")
+                return
+        except Exception as e:
+            print(f"[storage] Dedupe check error: {e}")
+    else:
+        # Không có symbol → check trùng theo source_msg_id
+        try:
+            existing = supabase.table("alpha_events") \
+                .select("id") \
+                .eq("source_msg_id", msg_id) \
+                .execute()
+            if existing.data:
+                print(f"[storage] Skip duplicate msg_id: {msg_id}")
+                return
+        except Exception as e:
+            print(f"[storage] Dedupe check error: {e}")
+
+    # Status: chưa có symbol → "pending" (chờ Binance công bố token)
+    status = "upcoming" if symbol else "pending"
 
     data = {
         "project_name":     parsed.get("project_name"),
@@ -50,7 +63,7 @@ def save_event(parsed: dict, raw_text: str, source_channel: str, msg_id: int):
         "amount_per_user":  parsed.get("amount_per_user"),
         "decay_rule":       parsed.get("decay_rule"),
         "event_time":       parsed.get("event_time_utc"),
-        "status":           "upcoming",
+        "status":           status,
         "source_channel":   source_channel,
         "source_msg_id":    msg_id,
         "raw_text":         raw_text,
@@ -59,7 +72,7 @@ def save_event(parsed: dict, raw_text: str, source_channel: str, msg_id: int):
 
     try:
         supabase.table("alpha_events").insert(data).execute()
-        print(f"[storage] Saved: {symbol} → Supabase ✓")
+        print(f"[storage] Saved: symbol={symbol or 'TBA'}, status={status} → Supabase ✓")
         refresh_r2_snapshot()
     except Exception as e:
         print(f"[storage] Insert error: {e}")
@@ -74,11 +87,13 @@ def refresh_r2_snapshot():
             .order("created_at", desc=True) \
             .execute().data
 
+        pending  = [e for e in all_events if e["status"] == "pending"]
         upcoming = [e for e in all_events if e["status"] == "upcoming"]
         live     = [e for e in all_events if e["status"] == "live"]
         history  = [e for e in all_events if e["status"] == "ended"]
 
         files = {
+            "alpha-events/pending.json":  pending,
             "alpha-events/upcoming.json": upcoming,
             "alpha-events/live.json":     live,
             "alpha-events/history.json":  history,
@@ -95,7 +110,9 @@ def refresh_r2_snapshot():
                 CacheControl='max-age=60'
             )
 
-        print(f"[storage] R2 snapshot updated ({len(all_events)} events) ✓")
+        print(f"[storage] R2 snapshot updated — "
+              f"pending={len(pending)}, upcoming={len(upcoming)}, "
+              f"live={len(live)}, ended={len(history)} ✓")
 
     except Exception as e:
         print(f"[storage] R2 error: {e}")
