@@ -13,7 +13,9 @@ import requests
 from datetime import datetime, timezone
 
 BSCSCAN_API_KEY = os.getenv("BSCSCAN_API_KEY", "")
-BSCSCAN_BASE    = "https://api.bscscan.com/api"
+# BSCScan giờ dùng Etherscan API V2 với chainid=56
+BSCSCAN_BASE    = "https://api.etherscan.io/v2/api"
+BSCSCAN_CHAINID = "56"
 
 # 2 wallet router Binance Alpha
 ROUTER_WALLETS = [
@@ -51,6 +53,7 @@ def _get_token_transfers(wallet: str, limit: int = 50) -> list:
     """Lấy token transfers gần nhất của wallet từ BSCScan."""
     try:
         r = SESSION.get(BSCSCAN_BASE, params={
+            "chainid":  BSCSCAN_CHAINID,
             "module":   "account",
             "action":   "tokentx",
             "address":  wallet,
