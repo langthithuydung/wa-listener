@@ -12,10 +12,9 @@ import time
 import requests
 from datetime import datetime, timezone
 
-BSCSCAN_API_KEY = os.getenv("BSCSCAN_API_KEY", "")
-# BSCScan giờ dùng Etherscan API V2 với chainid=56
-BSCSCAN_BASE    = "https://api.etherscan.io/v2/api"
-BSCSCAN_CHAINID = "56"
+# Moralis API — free tier, hỗ trợ BSC, 40k calls/ngày
+MORALIS_API_KEY = os.getenv("MORALIS_API_KEY", "")
+MORALIS_BASE    = "https://deep-index.moralis.io/api/v2.2"
 
 # 2 wallet router Binance Alpha
 ROUTER_WALLETS = [
@@ -49,29 +48,36 @@ def _load_known_contracts(supabase) -> set:
     return _known_contracts
 
 
-def _get_token_transfers(wallet: str, limit: int = 50) -> list:
-    """Lấy token transfers gần nhất của wallet từ BSCScan."""
+def _get_token_transfers(wallet: str, limit: int = 100) -> list:
+    """Lấy token transfers gần nhất của wallet từ Moralis API."""
     try:
-        r = SESSION.get(BSCSCAN_BASE, params={
-            "chainid":  BSCSCAN_CHAINID,
-            "module":   "account",
-            "action":   "tokentx",
-            "address":  wallet,
-            "page":     1,
-            "offset":   limit,
-            "sort":     "desc",
-            "apikey":   BSCSCAN_API_KEY,
-        }, timeout=15)
+        r = SESSION.get(
+            f"{MORALIS_BASE}/wallets/{wallet}/tokens/transfers",
+            params={"chain": "bsc", "limit": limit, "order": "DESC"},
+            headers={"X-API-Key": MORALIS_API_KEY},
+            timeout=15
+        )
         r.raise_for_status()
         data = r.json()
-        if data.get("status") == "1":
-            return data.get("result", [])
-        else:
-            print(f"[blind_box] BSCScan {wallet[:10]}...: {data.get('message','')} | result={str(data.get('result',''))[:100]}")
-            print(f"[blind_box] API key set: {bool(BSCSCAN_API_KEY)} | key prefix: {BSCSCAN_API_KEY[:6] if BSCSCAN_API_KEY else 'EMPTY'}")
-            return []
+        raw = data.get("result", [])
+
+        # Normalize Moralis format → format tương tự BSCScan
+        normalized = []
+        for tx in raw:
+            normalized.append({
+                "contractAddress": tx.get("token_address", "").lower(),
+                "tokenSymbol":     tx.get("token_symbol", ""),
+                "tokenName":       tx.get("token_name", ""),
+                "to":              tx.get("to_address", "").lower(),
+                "from":            tx.get("from_address", "").lower(),
+                "value":           tx.get("value", "0"),
+                "tokenDecimal":    str(tx.get("token_decimals", 18)),
+                "hash":            tx.get("transaction_hash", ""),
+            })
+        print(f"[blind_box] Moralis {wallet[:10]}...: {len(normalized)} transfers")
+        return normalized
     except Exception as e:
-        print(f"[blind_box] BSCScan API error: {e}")
+        print(f"[blind_box] Moralis API error ({wallet[:10]}...): {e}")
         return []
 
 
@@ -102,8 +108,8 @@ def detect_blind_box_candidates(supabase) -> list:
     Main function: quét 2 router wallet, trả về list token candidate mới.
     [{"contract": "0x...", "symbol": "XYZ", "name": "...", "wallet": "0x...", ...}]
     """
-    if not BSCSCAN_API_KEY:
-        print("[blind_box] BSCSCAN_API_KEY not set, skipping")
+    if not MORALIS_API_KEY:
+        print("[blind_box] MORALIS_API_KEY not set, skipping")
         return []
 
     known = _load_known_contracts(supabase)
