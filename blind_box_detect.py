@@ -97,7 +97,8 @@ def _get_token_transfers(wallet: str, limit: int = 100) -> list:
                 "value":           tx.get("value") or tx.get("value_decimal") or "0",
                 "tokenDecimal":    str(decimals),
                 "hash":            tx.get("transaction_hash") or tx.get("hash") or "",
-                "_raw":            tx,  # giữ raw để debug
+                "possible_spam":   tx.get("possible_spam", False),
+                "verified":        tx.get("verified_contract", False),
             })
         # Log sample để verify field names
         if normalized:
@@ -172,6 +173,14 @@ def detect_blind_box_candidates(supabase) -> list:
 
             # Bỏ qua token số lượng quá nhỏ (< 10,000)
             if amount < 10_000:
+                continue
+
+            # Bỏ qua spam token (Moralis đã label)
+            if tx.get("possible_spam"):
+                continue
+
+            # Bỏ qua amount quá lớn bất thường (> 1 tỷ = meme/spam)
+            if amount > 1_000_000_000:
                 continue
 
             # Bỏ qua stablecoin / BNB / LP tokens
