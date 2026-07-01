@@ -67,7 +67,8 @@ def _get_token_transfers(wallet: str, limit: int = 50) -> list:
         if data.get("status") == "1":
             return data.get("result", [])
         else:
-            print(f"[blind_box] BSCScan {wallet[:10]}...: {data.get('message','')}")
+            print(f"[blind_box] BSCScan {wallet[:10]}...: {data.get('message','')} | result={str(data.get('result',''))[:100]}")
+            print(f"[blind_box] API key set: {bool(BSCSCAN_API_KEY)} | key prefix: {BSCSCAN_API_KEY[:6] if BSCSCAN_API_KEY else 'EMPTY'}")
             return []
     except Exception as e:
         print(f"[blind_box] BSCScan API error: {e}")
