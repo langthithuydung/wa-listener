@@ -60,19 +60,53 @@ def _get_token_transfers(wallet: str, limit: int = 100) -> list:
         data = r.json()
         raw = data.get("result", [])
 
-        # Normalize Moralis format → format tương tự BSCScan
+        # Normalize Moralis format
         normalized = []
         for tx in raw:
+            # Moralis ERC20 transfers: token info dalam nested "token" object
+            token_info = tx.get("token") or {}
+            contract = (
+                tx.get("token_address")
+                or token_info.get("contract_address")
+                or tx.get("address")
+                or ""
+            ).lower()
+            symbol = (
+                tx.get("token_symbol")
+                or token_info.get("symbol")
+                or tx.get("symbol")
+                or ""
+            )
+            name = (
+                tx.get("token_name")
+                or token_info.get("name")
+                or tx.get("name")
+                or ""
+            )
+            decimals = (
+                tx.get("token_decimals")
+                or token_info.get("decimals")
+                or 18
+            )
             normalized.append({
-                "contractAddress": tx.get("token_address", "").lower(),
-                "tokenSymbol":     tx.get("token_symbol", ""),
-                "tokenName":       tx.get("token_name", ""),
-                "to":              tx.get("to_address", "").lower(),
-                "from":            tx.get("from_address", "").lower(),
-                "value":           tx.get("value", "0"),
-                "tokenDecimal":    str(tx.get("token_decimals", 18)),
-                "hash":            tx.get("transaction_hash", ""),
+                "contractAddress": contract,
+                "tokenSymbol":     symbol,
+                "tokenName":       name,
+                "to":              (tx.get("to_address") or "").lower(),
+                "from":            (tx.get("from_address") or "").lower(),
+                "value":           tx.get("value") or tx.get("value_decimal") or "0",
+                "tokenDecimal":    str(decimals),
+                "hash":            tx.get("transaction_hash") or tx.get("hash") or "",
+                "_raw":            tx,  # giữ raw để debug
             })
+        # Log sample để verify field names
+        if normalized:
+            sample = normalized[0]
+            print(f"[blind_box] Sample contract={sample['contractAddress'][:12] if sample['contractAddress'] else 'EMPTY'} symbol={sample['tokenSymbol']}")
+        # Log raw fields của tx đầu tiên để debug
+        if raw:
+            print(f"[blind_box] Moralis raw fields: {list(raw[0].keys())}")
+            print(f"[blind_box] Moralis sample tx: {str(raw[0])[:300]}")
         print(f"[blind_box] Moralis {wallet[:10]}...: {len(normalized)} transfers")
         return normalized
     except Exception as e:
