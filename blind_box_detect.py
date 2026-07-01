@@ -51,8 +51,9 @@ def _load_known_contracts(supabase) -> set:
 def _get_token_transfers(wallet: str, limit: int = 100) -> list:
     """Lấy token transfers gần nhất của wallet từ Moralis API."""
     try:
+        # Endpoint đúng của Moralis cho ERC20 transfers
         r = SESSION.get(
-            f"{MORALIS_BASE}/wallets/{wallet}/tokens/transfers",
+            f"{MORALIS_BASE}/{wallet}/erc20/transfers",
             params={"chain": "bsc", "limit": limit, "order": "DESC"},
             headers={"X-API-Key": MORALIS_API_KEY},
             timeout=15
