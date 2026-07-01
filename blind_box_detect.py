@@ -31,18 +31,16 @@ _cache_loaded = False
 
 
 def _load_known_contracts(supabase) -> set:
-    """Load tất cả contract đã có trong Supabase."""
+    """Load contract đã biết từ cả alpha_events lẫn blind_box_candidates."""
     global _known_contracts, _cache_loaded
-    if _cache_loaded:
-        return _known_contracts
+    # Reload mỗi lần để bắt candidates mới nhất
     try:
-        rows = supabase.table("alpha_events") \
-            .select("contract_address, symbol") \
-            .not_.is_("contract_address", "null") \
-            .execute().data
-        _known_contracts = {r["contract_address"].lower() for r in rows if r.get("contract_address")}
+        rows1 = supabase.table("alpha_events")             .select("contract_address")             .not_.is_("contract_address", "null")             .execute().data
+        rows2 = supabase.table("blind_box_candidates")             .select("contract_address")             .execute().data
+        all_rows = rows1 + rows2
+        _known_contracts = {r["contract_address"].lower() for r in all_rows if r.get("contract_address")}
         _cache_loaded = True
-        print(f"[blind_box] Loaded {len(_known_contracts)} known contracts")
+        print(f"[blind_box] Known contracts: {len(_known_contracts)} (events+candidates)")
     except Exception as e:
         print(f"[blind_box] Load known contracts error: {e}")
     return _known_contracts
@@ -138,13 +136,25 @@ def detect_blind_box_candidates(supabase) -> list:
             if contract in known:
                 continue
 
-            # Bỏ qua token số lượng quá nhỏ (< 1000)
-            if amount < 1000:
+            # Bỏ qua token số lượng quá nhỏ (< 10,000)
+            if amount < 10_000:
                 continue
 
-            # Bỏ qua stablecoin / BNB
-            skip_symbols = {"USDT", "USDC", "BUSD", "BNB", "WBNB", "ETH", "WETH"}
+            # Bỏ qua stablecoin / BNB / LP tokens
+            skip_symbols = {"USDT", "USDC", "BUSD", "BNB", "WBNB", "ETH", "WETH",
+                           "CAKE", "CAKE-LP", "BAKE", "XVS", "VENUS"}
             if symbol.upper() in skip_symbols:
+                continue
+
+            # Bỏ qua token có ký tự không phải ASCII (spam meme Chinese token)
+            try:
+                symbol.encode('ascii')
+                name.encode('ascii')
+            except UnicodeEncodeError:
+                continue
+
+            # Bỏ qua symbol quá ngắn (< 2 ký tự) hoặc quá dài (> 10)
+            if not (2 <= len(symbol) <= 10):
                 continue
 
             if contract not in candidates:
