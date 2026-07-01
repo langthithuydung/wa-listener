@@ -108,11 +108,11 @@ def run_blindbox():
 @app.get("/test")
 def test():
     text = """
-Binance Alpha's second wave of Collect on Fanable (COLLECT) airdrop rewards are here!
-Users with at least 224 Binance Alpha Points can claim an airdrop of 800 COLLECT tokens
-on a first-come, first-served basis. If the reward pool is not fully distributed, the score
-threshold will automatically decrease by 5 points every 5 minutes. Please note that claiming
-the airdrop will consume 15 Binance Alpha Points.
+Please get ready to claim the Binance Alpha airdrop and trade today at 10:00 (UTC).
+Users with at least 224 Binance Alpha Points can claim the token on a first-come,
+first-served basis until the airdrop pool is fully distributed or the airdrop event expires.
+Further details will be announced soon. Please stay tuned to Binance's official channels
+for the specific airdrop tokens and the latest updates.
 """
     print("=" * 60)
     print("[TEST] Running parser...")
