@@ -45,7 +45,6 @@ def job_poll_announcements():
     Gọi Binance Announcement API mỗi 3 phút.
     Bắt TGE/Pre-TGE/Alpha listing mà Telegram có thể miss.
     """
-    print("[poller] Running...")
     try:
         r = SESSION.get(
             "https://www.binance.com/bapi/composite/v1/public/cms/article/list/query",
@@ -97,7 +96,6 @@ def job_enrich_prices():
     Mỗi 5 phút: lấy tất cả upcoming + pending có symbol
     → update contract_address, price_snapshot, value_usd, market_cap
     """
-    print("[enrich] Running...")
     try:
         supabase = _get_supabase()
         rows = supabase.table("alpha_events") \
@@ -106,12 +104,7 @@ def job_enrich_prices():
             .not_.is_("symbol", "null") \
             .execute().data
 
-        # Lọc rows có symbol (tránh lỗi Supabase null filter)
-        rows = [r for r in rows if r.get("symbol")]
-        print(f"[enrich] Found {len(rows)} rows with symbol to enrich")
-
         if not rows:
-            print("[enrich] No rows to enrich")
             return
 
         updated = 0
@@ -171,7 +164,6 @@ def job_auto_expire():
     upcoming → live → ended
     pending (48h) → ended
     """
-    print("[expire] Running...")
     try:
         supabase = _get_supabase()
         now = datetime.now(timezone.utc)
@@ -250,9 +242,13 @@ def start_scheduler():
     scheduler.add_job(job_auto_expire, 'interval', minutes=30,
                       id='auto_expire', max_instances=1)
 
+    # Blind box detection mỗi 5 phút
+    scheduler.add_job(job_blind_box_detect, 'interval', minutes=5,
+                      id='blind_box_detect', max_instances=1)
+
     scheduler.start()
     print("[scheduler] Started ✓")
-    print("[scheduler] Jobs: poll(3m), enrich(5m), expire(30m)")
+    print("[scheduler] Jobs: poll(3m), enrich(5m), expire(30m), blindbox(5m)")
 
     # Chạy ngay lần đầu sau 10 giây
     import threading
@@ -264,3 +260,21 @@ def start_scheduler():
     threading.Thread(target=_run_initial, daemon=True).start()
 
     return scheduler
+
+
+# ── JOB 4: Blind Box Detection ───────────────────────────────────────
+def job_blind_box_detect():
+    """
+    Mỗi 5 phút khi có pending event:
+    Quét 2 Binance Alpha Router wallet trên BSC
+    → phát hiện token mới → candidate blind box
+    """
+    print("[blind_box] Running...")
+    try:
+        from blind_box_detect import run_detection
+        supabase = _get_supabase()
+        candidates = run_detection(supabase)
+        if candidates:
+            print(f"[blind_box] {len(candidates)} new candidate(s) found ✓")
+    except Exception as e:
+        print(f"[blind_box] Job error: {e}")

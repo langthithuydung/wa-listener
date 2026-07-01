@@ -94,6 +94,16 @@ def run_poll():
     except Exception as e:
         return {"success": False, "error": str(e)}
 
+@app.get("/run/blindbox")
+def run_blindbox():
+    """Chạy blind box detector thủ công."""
+    try:
+        from scheduler import job_blind_box_detect
+        job_blind_box_detect()
+        return {"success": True}
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
 # ── Test endpoint ─────────────────────────────────────
 @app.get("/test")
 def test():
