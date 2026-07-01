@@ -45,6 +45,7 @@ def job_poll_announcements():
     Gọi Binance Announcement API mỗi 3 phút.
     Bắt TGE/Pre-TGE/Alpha listing mà Telegram có thể miss.
     """
+    print("[poller] Running...")
     try:
         r = SESSION.get(
             "https://www.binance.com/bapi/composite/v1/public/cms/article/list/query",
@@ -96,6 +97,7 @@ def job_enrich_prices():
     Mỗi 5 phút: lấy tất cả upcoming + pending có symbol
     → update contract_address, price_snapshot, value_usd, market_cap
     """
+    print("[enrich] Running...")
     try:
         supabase = _get_supabase()
         rows = supabase.table("alpha_events") \
@@ -104,7 +106,12 @@ def job_enrich_prices():
             .not_.is_("symbol", "null") \
             .execute().data
 
+        # Lọc rows có symbol (tránh lỗi Supabase null filter)
+        rows = [r for r in rows if r.get("symbol")]
+        print(f"[enrich] Found {len(rows)} rows with symbol to enrich")
+
         if not rows:
+            print("[enrich] No rows to enrich")
             return
 
         updated = 0
@@ -164,6 +171,7 @@ def job_auto_expire():
     upcoming → live → ended
     pending (48h) → ended
     """
+    print("[expire] Running...")
     try:
         supabase = _get_supabase()
         now = datetime.now(timezone.utc)
