@@ -19,17 +19,18 @@ import threading
 
 from alpha_parser import parse_message
 from storage import save_event, refresh_r2_snapshot
+from scheduler import start_scheduler
 
-# ── Config ──────────────────────────────────────────
+# ── Config ───────────────────────────────────────────
 API_ID   = int(os.getenv("TELEGRAM_API_ID"))
 API_HASH = os.getenv("TELEGRAM_API_HASH")
 
 CHANNELS = [
-    "binance_wallet_announcements",  # Priority 1
-    "binance_announcements",         # Priority 2
+    "binance_wallet_announcements",
+    "binance_announcements",
 ]
 
-# ── FastAPI ──────────────────────────────────────────
+# ── FastAPI ───────────────────────────────────────────
 app = FastAPI()
 
 @app.get("/health")
@@ -48,27 +49,63 @@ def root():
 def head_root():
     return Response(status_code=200)
 
-# ── Telegram status (để debug) ───────────────────────
+# ── Debug endpoints ───────────────────────────────────
 telegram_status = {"connected": False, "last_error": None, "restarts": 0}
 
 @app.get("/telegram-status")
 def tg_status():
     return telegram_status
 
-# ── Test endpoint ────────────────────────────────────
+@app.get("/refresh")
+def refresh():
+    try:
+        refresh_r2_snapshot()
+        return {"success": True, "message": "R2 snapshot refreshed"}
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+@app.get("/run/expire")
+def run_expire():
+    """Chạy auto_expire thủ công."""
+    try:
+        from scheduler import job_auto_expire
+        job_auto_expire()
+        return {"success": True}
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+@app.get("/run/enrich")
+def run_enrich():
+    """Chạy enrich_prices thủ công."""
+    try:
+        from scheduler import job_enrich_prices
+        job_enrich_prices()
+        return {"success": True}
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+@app.get("/run/poll")
+def run_poll():
+    """Chạy announcement poller thủ công."""
+    try:
+        from scheduler import job_poll_announcements
+        job_poll_announcements()
+        return {"success": True}
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+# ── Test endpoint ─────────────────────────────────────
 @app.get("/test")
 def test():
     text = """
-Please get ready to claim the Binance Alpha airdrop and trade today at 10:00 (UTC).
-Users with at least 224 Binance Alpha Points can claim the token on a first-come,
-first-served basis until the airdrop pool is fully distributed or the airdrop event expires.
-Further details will be announced soon. Please stay tuned to Binance's official channels
-for the specific airdrop tokens and the latest updates.
+Binance Alpha's second wave of Collect on Fanable (COLLECT) airdrop rewards are here!
+Users with at least 224 Binance Alpha Points can claim an airdrop of 800 COLLECT tokens
+on a first-come, first-served basis. If the reward pool is not fully distributed, the score
+threshold will automatically decrease by 5 points every 5 minutes. Please note that claiming
+the airdrop will consume 15 Binance Alpha Points.
 """
-
-    print("=" * 80)
+    print("=" * 60)
     print("[TEST] Running parser...")
-
     parsed = parse_message(text)
     print("[PARSED]", parsed)
 
@@ -80,14 +117,11 @@ for the specific airdrop tokens and the latest updates.
             source_channel="binance_wallet_announcements",
             msg_id=test_msg_id
         )
-        print(f"[TEST] Saved to Supabase + R2 (msg_id={test_msg_id})")
+        print(f"[TEST] Saved (msg_id={test_msg_id})")
 
-    return {
-        "success": parsed is not None,
-        "parsed": parsed
-    }
+    return {"success": parsed is not None, "parsed": parsed}
 
-# ── Telegram Listener ────────────────────────────────
+# ── Telegram Listener ─────────────────────────────────
 client = TelegramClient("session_wave_alpha", API_ID, API_HASH)
 
 @client.on(events.NewMessage(chats=CHANNELS))
@@ -107,7 +141,7 @@ async def on_message(event):
         print(f"[PARSED] {parsed}")
         save_event(parsed, text, channel, msg_id)
     else:
-        print("[skip] Không liên quan đến Alpha hoặc thiếu event_type")
+        print("[skip] Không liên quan Alpha hoặc thiếu event_type")
 
 async def start_telegram():
     await client.start(phone=os.getenv("TELEGRAM_PHONE"))
@@ -130,13 +164,18 @@ def run_telegram_in_thread():
             telegram_status["restarts"] += 1
             print(f"[Telegram] ❌ CRASHED: {e}")
             traceback.print_exc()
-            print(f"[Telegram] Reconnecting in 30s... (total restarts: {telegram_status['restarts']})")
+            print(f"[Telegram] Reconnecting in 30s...")
             time.sleep(30)
 
-# ── Start ────────────────────────────────────────────
+# ── Start ─────────────────────────────────────────────
 if __name__ == "__main__":
+    # 1. APScheduler (poll + enrich + expire)
+    start_scheduler()
+
+    # 2. Telegram listener
     tg_thread = threading.Thread(target=run_telegram_in_thread, daemon=True)
     tg_thread.start()
 
+    # 3. FastAPI
     port = int(os.getenv("PORT", 8000))
     uvicorn.run(app, host="0.0.0.0", port=port)
