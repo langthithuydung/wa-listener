@@ -113,14 +113,25 @@ def _load_known_contracts(supabase) -> set:
 # ── Fetch transfers với time filter ──────────────────────────────────
 def _get_transfers_since(wallet: str, since_dt: datetime, limit: int = 200) -> list:
     """Lấy token transfers từ wallet kể từ since_dt."""
+    now = datetime.now(timezone.utc)
+
+    # Moralis free tier: chỉ query trong 24h gần nhất
+    # Nếu since_dt quá cũ → clamp về 24h trước
+    max_lookback = now - timedelta(hours=24)
+    if since_dt < max_lookback:
+        since_dt = max_lookback
+
+    # Moralis dùng Unix timestamp (seconds)
+    since_ts = int(since_dt.timestamp())
+
     try:
         r = SESSION.get(
             f"{MORALIS_BASE}/{wallet}/erc20/transfers",
             params={
-                "chain":       "bsc",
-                "limit":       limit,
-                "order":       "DESC",
-                "from_date":   since_dt.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                "chain":      "bsc",
+                "limit":      limit,
+                "order":      "DESC",
+                "from_date":  since_ts,
             },
             headers={"X-API-Key": MORALIS_API_KEY},
             timeout=15
