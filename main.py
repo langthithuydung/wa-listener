@@ -99,8 +99,12 @@ def debug_channels():
     """
     Kiểm tra: account session có đang join channel không,
     và lấy 10 tin nhắn gần nhất để verify bot thực sự nhận được gì.
+    Chạy trên đúng event loop của Telegram client (bắt buộc với Telethon).
     """
-    import asyncio
+    import asyncio, concurrent.futures
+
+    if telegram_loop is None:
+        return {"error": "Telegram loop not ready yet, try again in a few seconds"}
 
     async def _check():
         result = {"channels": {}}
@@ -128,10 +132,8 @@ def debug_channels():
         return result
 
     try:
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        result = loop.run_until_complete(_check())
-        loop.close()
+        future = asyncio.run_coroutine_threadsafe(_check(), telegram_loop)
+        result = future.result(timeout=20)
         return result
     except Exception as e:
         return {"error": str(e)}
@@ -203,12 +205,16 @@ async def start_telegram():
     print(f"[Telegram] Monitoring: {CHANNELS}")
     await client.run_until_disconnected()
 
+telegram_loop = None
+
 def run_telegram_in_thread():
+    global telegram_loop
     while True:
         try:
             print(f"[Telegram] Starting... (attempt #{telegram_status['restarts'] + 1})")
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
+            telegram_loop = loop
             loop.run_until_complete(start_telegram())
         except Exception as e:
             telegram_status["connected"] = False
