@@ -221,15 +221,27 @@ def run_detection(supabase) -> list:
 
     print(f"[blind_box] Known contracts: {len(known)}")
 
-    # Tìm token mới (chưa có trong known + chưa có trong snapshot trước)
+    # First run: chưa có snapshot trước → không thể so sánh, bỏ qua lần này
+    if not _prev_token_snapshot:
+        print("[blind_box] First run — no previous snapshot to compare, skipping (will detect diffs from next run)")
+        return []
+
+    # Tìm token THỰC SỰ MỚI: có trong snapshot hiện tại nhưng KHÔNG có ở lần trước
+    new_contracts = set(new_snapshot.keys()) - set(_prev_token_snapshot.keys()) - known
+    print(f"[blind_box] New tokens since last snapshot: {len(new_contracts)}")
+
+    if not new_contracts:
+        print("[blind_box] No new tokens detected")
+        return []
+
+    # Giới hạn tối đa 15 candidates để tránh quá nhiều Moralis calls
+    new_contracts = list(new_contracts)[:15]
+
     candidates = []
     now = datetime.now(timezone.utc)
 
-    for contract, info in new_snapshot.items():
-        if contract in known:
-            continue
-
-        is_new_in_list = contract not in _prev_token_snapshot
+    for contract in new_contracts:
+        info = new_snapshot[contract]
 
         # Check router involvement qua Moralis token transfer API
         router_info = {}
@@ -237,7 +249,7 @@ def run_detection(supabase) -> list:
             router_info = _check_router_involvement(contract)
             time.sleep(0.2)  # rate limit
 
-        score = _score_token(info, router_info, is_new_in_list)
+        score = _score_token(info, router_info, is_new=True)
 
         candidates.append({
             "contract":        contract,
@@ -247,7 +259,7 @@ def run_detection(supabase) -> list:
             "market_cap":      info["market_cap"],
             "fdv":             info["fdv"],
             "chain_id":        info["chain_id"],
-            "is_new":          is_new_in_list,
+            "is_new":          True,
             "router_involved": router_info.get("router_involved", False),
             "router_wallet":   router_info.get("router_wallet"),
             "transfer_amount": router_info.get("transfer_amount", 0),
