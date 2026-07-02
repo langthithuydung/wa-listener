@@ -57,9 +57,39 @@ def _find_pending_match(parsed: dict) -> dict | None:
         return None
 
 
+def _is_message_processed(source_channel: str, msg_id: int) -> bool:
+    """Check bảng processed_messages riêng, độc lập với alpha_events mutations."""
+    try:
+        rows = supabase.table("processed_messages") \
+            .select("id") \
+            .eq("source_channel", source_channel) \
+            .eq("msg_id", msg_id) \
+            .execute().data
+        return len(rows) > 0
+    except Exception as e:
+        print(f"[storage] processed_messages check error: {e}")
+        return False
+
+
+def _mark_message_processed(source_channel: str, msg_id: int):
+    try:
+        supabase.table("processed_messages").insert({
+            "source_channel": source_channel,
+            "msg_id": msg_id,
+        }).execute()
+    except Exception:
+        pass  # đã tồn tại (unique constraint) → bỏ qua
+
+
 def save_event(parsed: dict, raw_text: str, source_channel: str, msg_id: int):
     symbol     = parsed.get("symbol") or None
     event_type = parsed.get("event_type")
+
+    # ── Bước 0: Check msg_id đã xử lý chưa (chặn catch-up re-save tin cũ) ──
+    if _is_message_processed(source_channel, msg_id):
+        print(f"[storage] Skip: msg_id={msg_id} already processed before")
+        return
+    _mark_message_processed(source_channel, msg_id)
 
     # ── Bước 1: Nếu có symbol → thử update row pending trước ─────────
     if symbol:
