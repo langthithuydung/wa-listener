@@ -94,6 +94,48 @@ def run_poll():
     except Exception as e:
         return {"success": False, "error": str(e)}
 
+@app.get("/debug/channels")
+def debug_channels():
+    """
+    Kiểm tra: account session có đang join channel không,
+    và lấy 10 tin nhắn gần nhất để verify bot thực sự nhận được gì.
+    """
+    import asyncio
+
+    async def _check():
+        result = {"channels": {}}
+        for ch in CHANNELS:
+            try:
+                entity = await client.get_entity(ch)
+                messages = await client.get_messages(entity, limit=10)
+                result["channels"][ch] = {
+                    "joined": True,
+                    "entity_title": getattr(entity, "title", str(entity)),
+                    "recent_messages": [
+                        {
+                            "id": m.id,
+                            "date": m.date.isoformat() if m.date else None,
+                            "text_preview": (m.message or "")[:150],
+                        }
+                        for m in messages if m.message
+                    ]
+                }
+            except Exception as e:
+                result["channels"][ch] = {
+                    "joined": False,
+                    "error": str(e)
+                }
+        return result
+
+    try:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        result = loop.run_until_complete(_check())
+        loop.close()
+        return result
+    except Exception as e:
+        return {"error": str(e)}
+
 @app.get("/run/blindbox")
 def run_blindbox():
     """Chạy blind box detector thủ công."""
