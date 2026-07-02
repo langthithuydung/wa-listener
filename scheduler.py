@@ -193,12 +193,15 @@ def job_auto_expire():
                 is_expired = now >= expire_at
                 is_live    = (et - timedelta(hours=1)) <= now < expire_at
             else:
-                # pending không có event_time → expire sau 48h
+                # Không có event_time:
+                #   status "upcoming" (đã có symbol, đang claim) → expire sau 24h
+                #   status "pending"  (chưa có symbol/blindbox) → expire sau 48h
                 try:
                     created = datetime.fromisoformat(row["created_at"].replace("Z", "+00:00"))
                 except Exception:
                     continue
-                expire_at  = created + timedelta(hours=48)
+                timeout_hours = 24 if status == "upcoming" else 48
+                expire_at  = created + timedelta(hours=timeout_hours)
                 is_expired = now >= expire_at
                 is_live    = False
 
