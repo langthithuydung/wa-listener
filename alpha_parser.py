@@ -1,11 +1,18 @@
 import json
 import os
 import re
+import time
 import urllib.request
 import urllib.error
 
 MODEL_NAME = "gemini-2.0-flash-lite"
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+
+# Hỗ trợ nhiều API key, phân cách bằng dấu phẩy: "key1,key2,key3"
+_raw_keys = os.getenv("GEMINI_API_KEYS") or os.getenv("GEMINI_API_KEY", "")
+GEMINI_API_KEYS = [k.strip() for k in _raw_keys.split(",") if k.strip()]
+
+_last_call_ts = 0.0
+MIN_INTERVAL = 4.5  # giây giữa 2 lần gọi Gemini (an toàn dưới 15 RPM free tier)
 
 KEYWORDS = [
     "alpha", "airdrop", "tge", "token generation",
@@ -17,7 +24,6 @@ def is_relevant(text: str) -> bool:
     return any(kw in text_lower for kw in KEYWORDS)
 
 
-# Các từ viết hoa trong ngoặc KHÔNG phải token symbol
 SYMBOL_BLACKLIST = {
     "UTC", "TGE", "AM", "PM", "GMT", "USD", "USDT", "USDC", "BNB",
     "CEO", "API", "URL", "FAQ", "TBA", "TBD", "ID", "VIP", "KYC",
@@ -28,15 +34,12 @@ SYMBOL_BLACKLIST = {
 def parse_with_regex(text: str) -> dict:
     result = {}
 
-    # ── Symbol: (COLLECT) hoặc $COLLECT ──────────────────────────────
     for m in re.finditer(r'\(([A-Z]{2,10})\)|\$([A-Z]{2,10})', text):
         candidate = m.group(1) or m.group(2)
         if candidate not in SYMBOL_BLACKLIST:
             result["symbol"] = candidate
             break
 
-    # ── Points threshold ──────────────────────────────────────────────
-    # "224 Binance Alpha Points" / "at least 224 Alpha Points"
     points = re.search(
         r'(?:at\s+least\s+)?(\d+)\s*(?:binance\s*)?alpha\s*points?',
         text, re.IGNORECASE
@@ -44,8 +47,6 @@ def parse_with_regex(text: str) -> dict:
     if points:
         result["points_threshold"] = int(points.group(1))
 
-    # ── Amount per user ───────────────────────────────────────────────
-    # "800 COLLECT tokens" / "100 tokens per user" / "airdrop of 800 TOKEN"
     amount = re.search(
         r'(?:airdrop\s+of\s+|claim\s+(?:an?\s+)?(?:airdrop\s+of\s+)?)?'
         r'(\d[\d,]*)\s+[A-Z]{2,10}\s+tokens?',
@@ -59,8 +60,6 @@ def parse_with_regex(text: str) -> dict:
     if amount:
         result["amount_per_user"] = float(amount.group(1).replace(",", ""))
 
-    # ── Decay rule ────────────────────────────────────────────────────
-    # "decrease by 5 points every 5 minutes"
     decay = re.search(
         r'(?:score\s+)?threshold\s+will\s+(?:automatically\s+)?decrease\s+by\s+'
         r'(\d+)\s*points?\s+every\s+(\d+)\s*minutes?',
@@ -69,8 +68,6 @@ def parse_with_regex(text: str) -> dict:
     if decay:
         result["decay_rule"] = f"-{decay.group(1)}pts/{decay.group(2)}min"
 
-    # ── Points cost to claim ──────────────────────────────────────────
-    # "claiming the airdrop will consume 15 Binance Alpha Points"
     cost = re.search(
         r'(?:consume|cost|use)\s+(\d+)\s*(?:binance\s*)?alpha\s*points?',
         text, re.IGNORECASE
@@ -78,7 +75,6 @@ def parse_with_regex(text: str) -> dict:
     if cost:
         result["points_cost"] = int(cost.group(1))
 
-    # ── Event type ────────────────────────────────────────────────────
     lower = text.lower()
     if "tge" in lower or "token generation" in lower:
         result["event_type"] = "tge"
@@ -94,10 +90,51 @@ def _clean_json_text(raw: str) -> str:
     raw = re.sub(r"\s*```$", "", raw)
     return raw.strip()
 
+
+def _call_gemini_with_key(prompt: str, api_key: str) -> tuple[bool, dict, bool]:
+    """
+    Gọi Gemini với 1 key cụ thể.
+    Return: (success, result_dict, is_rate_limited)
+    """
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{MODEL_NAME}:generateContent?key={api_key}"
+    payload = {
+        "contents": [{"parts": [{"text": prompt}]}],
+        "generationConfig": {"temperature": 0, "responseMimeType": "application/json"}
+    }
+    try:
+        req = urllib.request.Request(
+            url,
+            data=json.dumps(payload).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=60) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+        text_out = data["candidates"][0]["content"]["parts"][0]["text"]
+        raw = _clean_json_text(text_out)
+        parsed = json.loads(raw)
+        return (True, parsed if isinstance(parsed, dict) else {}, False)
+    except urllib.error.HTTPError as e:
+        is_rate_limited = (e.code == 429)
+        print(f"[Gemini error] key=...{api_key[-6:]} HTTP {e.code}: {'Too Many Requests' if is_rate_limited else e.reason}")
+        return (False, {}, is_rate_limited)
+    except Exception as e:
+        print(f"[Gemini error] key=...{api_key[-6:] if api_key else '??????'} {e}")
+        return (False, {}, False)
+
+
 def parse_with_gemini(text: str) -> dict:
-    if not GEMINI_API_KEY:
-        print("[Gemini error] GEMINI_API_KEY not set")
+    global _last_call_ts
+
+    if not GEMINI_API_KEYS:
+        print("[Gemini error] No GEMINI_API_KEY(S) set")
         return {}
+
+    # Rate limit: đảm bảo khoảng cách tối thiểu giữa các lần gọi
+    elapsed = time.time() - _last_call_ts
+    if elapsed < MIN_INTERVAL:
+        time.sleep(MIN_INTERVAL - elapsed)
+    _last_call_ts = time.time()
 
     prompt = f"""
 Extract info from this Binance Alpha announcement.
@@ -109,38 +146,30 @@ Fields:
 - symbol (string or null — null if not announced yet)
 - event_type (string: "airdrop" or "tge" or null)
 - amount_per_user (number or null)
-- points_threshold (number or null — minimum points required to claim)
-- points_cost (number or null — points consumed when claiming)
-- decay_rule (string or null — e.g. "-5pts/5min")
+- points_threshold (number or null)
+- points_cost (number or null)
+- decay_rule (string or null)
 - event_time_utc (string ISO8601 or null)
 
 Announcement:
 {text}
 """.strip()
 
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/{MODEL_NAME}:generateContent?key={GEMINI_API_KEY}"
-    payload = {
-        "contents": [{"parts": [{"text": prompt}]}],
-        "generationConfig": {"temperature": 0, "responseMimeType": "application/json"}
-    }
+    # Thử lần lượt từng key, xoay vòng khi bị 429
+    for i, key in enumerate(GEMINI_API_KEYS):
+        success, result, is_rate_limited = _call_gemini_with_key(prompt, key)
+        if success:
+            return result
+        if not is_rate_limited:
+            # Lỗi khác (không phải rate limit) → không thử key khác, dừng luôn
+            return {}
+        # Rate limited → thử key tiếp theo
+        if i < len(GEMINI_API_KEYS) - 1:
+            print(f"[Gemini] Rotating to next key ({i+2}/{len(GEMINI_API_KEYS)})...")
 
-    try:
-        req = urllib.request.Request(
-            url,
-            data=json.dumps(payload).encode("utf-8"),
-            headers={"Content-Type": "application/json"},
-            method="POST",
-        )
-        with urllib.request.urlopen(req, timeout=60) as resp:
-            data = json.loads(resp.read().decode("utf-8"))
+    print(f"[Gemini error] All {len(GEMINI_API_KEYS)} key(s) rate limited")
+    return {}
 
-        text_out = data["candidates"][0]["content"]["parts"][0]["text"]
-        raw = _clean_json_text(text_out)
-        parsed = json.loads(raw)
-        return parsed if isinstance(parsed, dict) else {}
-    except Exception as e:
-        print(f"[Gemini error] {e}")
-        return {}
 
 def parse_message(text: str) -> dict | None:
     if not is_relevant(text):
@@ -158,7 +187,6 @@ def parse_message(text: str) -> dict | None:
     if missing:
         print("[Parser] Missing fields → use Gemini")
         gemini_result = parse_with_gemini(text)
-        # Regex ưu tiên hơn Gemini
         result = {**gemini_result, **result}
 
     if not result.get("event_type"):
