@@ -155,10 +155,10 @@ def catchup():
 
     try:
         future = asyncio.run_coroutine_threadsafe(_catchup(), telegram_loop)
-        result = future.result(timeout=30)
+        result = future.result(timeout=90)
         return {"success": True, "processed": result}
     except Exception as e:
-        return {"success": False, "error": str(e)}
+        return {"success": False, "error": str(e) or type(e).__name__}
 
 @app.get("/debug/channels")
 def debug_channels():

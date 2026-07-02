@@ -5,14 +5,18 @@ import time
 import urllib.request
 import urllib.error
 
-MODEL_NAME = "gemini-2.0-flash-lite"
+MODEL_NAME = "gemini-3.1-flash-lite"  # 2.0-flash-lite đã bị khai tử 1/6/2026
 
 # Hỗ trợ nhiều API key, phân cách bằng dấu phẩy: "key1,key2,key3"
 _raw_keys = os.getenv("GEMINI_API_KEYS") or os.getenv("GEMINI_API_KEY", "")
 GEMINI_API_KEYS = [k.strip() for k in _raw_keys.split(",") if k.strip()]
 
 _last_call_ts = 0.0
-MIN_INTERVAL = 4.5  # giây giữa 2 lần gọi Gemini (an toàn dưới 15 RPM free tier)
+MIN_INTERVAL = 2.0  # giây giữa 2 lần gọi Gemini
+
+# Circuit breaker: khi tất cả key đều bị rate limit, tạm ngưng gọi Gemini
+_cooldown_until = 0.0
+COOLDOWN_SECONDS = 300  # 5 phút
 
 KEYWORDS = [
     "alpha", "airdrop", "tge", "token generation",
@@ -124,14 +128,20 @@ def _call_gemini_with_key(prompt: str, api_key: str) -> tuple[bool, dict, bool]:
 
 
 def parse_with_gemini(text: str) -> dict:
-    global _last_call_ts
+    global _last_call_ts, _cooldown_until
 
     if not GEMINI_API_KEYS:
-        print("[Gemini error] No GEMINI_API_KEY(S) set")
+        return {}
+
+    # Circuit breaker: đang trong thời gian cooldown → bỏ qua Gemini hoàn toàn
+    now = time.time()
+    if now < _cooldown_until:
+        remaining = int(_cooldown_until - now)
+        print(f"[Gemini] In cooldown ({remaining}s left), skip call")
         return {}
 
     # Rate limit: đảm bảo khoảng cách tối thiểu giữa các lần gọi
-    elapsed = time.time() - _last_call_ts
+    elapsed = now - _last_call_ts
     if elapsed < MIN_INTERVAL:
         time.sleep(MIN_INTERVAL - elapsed)
     _last_call_ts = time.time()
@@ -167,7 +177,9 @@ Announcement:
         if i < len(GEMINI_API_KEYS) - 1:
             print(f"[Gemini] Rotating to next key ({i+2}/{len(GEMINI_API_KEYS)})...")
 
-    print(f"[Gemini error] All {len(GEMINI_API_KEYS)} key(s) rate limited")
+    # Tất cả key đều bị rate limit → kích hoạt cooldown, ngưng gọi Gemini một thời gian
+    _cooldown_until = time.time() + COOLDOWN_SECONDS
+    print(f"[Gemini error] All {len(GEMINI_API_KEYS)} key(s) rate limited → cooldown {COOLDOWN_SECONDS}s")
     return {}
 
 
