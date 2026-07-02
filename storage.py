@@ -170,11 +170,22 @@ def refresh_r2_snapshot():
         upcoming = [e for e in all_events if e["status"] == "upcoming"]
         live     = [e for e in all_events if e["status"] == "live"]
 
+        # Blind box candidates — sort by confidence_score
+        try:
+            candidates = supabase.table("blind_box_candidates") \
+                .select("*") \
+                .eq("status", "candidate") \
+                .order("confidence_score", desc=True) \
+                .execute().data
+        except Exception:
+            candidates = []
+
         # KHÔNG ghi đè history.json — do sync_alpha_history.py quản lý
         files = {
-            "alpha-events/pending.json":  pending,
-            "alpha-events/upcoming.json": upcoming,
-            "alpha-events/live.json":     live,
+            "alpha-events/pending.json":    pending,
+            "alpha-events/upcoming.json":   upcoming,
+            "alpha-events/live.json":       live,
+            "alpha-events/blindbox.json":   candidates,
         }
 
         def put(key, data):
@@ -190,7 +201,7 @@ def refresh_r2_snapshot():
         for key, data in files.items():
             put(key, data)
 
-        print(f"[storage] R2 updated — pending={len(pending)}, upcoming={len(upcoming)}, live={len(live)} ✓")
+        print(f"[storage] R2 updated — pending={len(pending)}, upcoming={len(upcoming)}, live={len(live)}, blindbox={len(candidates)} ✓")
 
     except Exception as e:
         print(f"[storage] R2 error: {e}")
