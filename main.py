@@ -94,6 +94,34 @@ def run_poll():
     except Exception as e:
         return {"success": False, "error": str(e)}
 
+
+async def _process_one_message(channel: str, msg_id: int, text: str):
+    """
+    Xử lý 1 tin nhắn: check đã xử lý chưa → relevant → parse → save.
+    LUÔN đánh dấu processed sau khi check xong (kể cả khi không lưu được event),
+    để tránh gọi Gemini lặp lại vô hạn cho tin không đủ field.
+    """
+    from alpha_parser import is_relevant
+    from storage import _is_message_processed, _mark_message_processed
+
+    if _is_message_processed(channel, msg_id):
+        return None
+
+    if not is_relevant(text):
+        # Không liên quan Alpha → đánh dấu luôn, không cần Gemini
+        _mark_message_processed(channel, msg_id)
+        return None
+
+    parsed = parse_message(text)  # có thể gọi Gemini bên trong
+
+    # Đánh dấu processed NGAY sau khi parse xong, bất kể kết quả
+    _mark_message_processed(channel, msg_id)
+
+    if parsed:
+        save_event(parsed, text, channel, msg_id)
+        return parsed
+    return None
+
 @app.get("/catchup")
 def catchup():
     """
@@ -106,8 +134,6 @@ def catchup():
         return {"error": "Telegram loop not ready yet, try again in a few seconds"}
 
     async def _catchup():
-        from alpha_parser import is_relevant
-        from storage import _is_message_processed
         results = []
         for ch in CHANNELS:
             try:
@@ -116,15 +142,8 @@ def catchup():
                 for m in messages:
                     if not m.message:
                         continue
-                    # Skip nếu đã xử lý (tránh phí gọi Gemini lại)
-                    if _is_message_processed(ch, m.id):
-                        continue
-                    # Lọc trước bằng keyword, tránh gọi Gemini cho tin không liên quan
-                    if not is_relevant(m.message):
-                        continue
-                    parsed = parse_message(m.message)
+                    parsed = await _process_one_message(ch, m.id, m.message)
                     if parsed:
-                        save_event(parsed, m.message, ch, m.id)
                         results.append({
                             "channel": ch, "msg_id": m.id,
                             "date": m.date.isoformat() if m.date else None,
@@ -237,17 +256,14 @@ async def on_message(event):
     print(f"\n[MSG] #{msg_id} from @{channel}")
     print(f"[TEXT] {text[:300]}")
 
-    parsed = parse_message(text)
+    parsed = await _process_one_message(channel, msg_id, text)
     if parsed:
         print(f"[PARSED] {parsed}")
-        save_event(parsed, text, channel, msg_id)
     else:
         print("[skip] Không liên quan Alpha hoặc thiếu event_type")
 
 async def _run_catchup_on_start():
     """Quét lại tin gần nhất mỗi khi bot khởi động/reconnect, tránh miss tin lúc restart."""
-    from alpha_parser import is_relevant
-    from storage import _is_message_processed
     try:
         for ch in CHANNELS:
             entity = await client.get_entity(ch)
@@ -255,13 +271,7 @@ async def _run_catchup_on_start():
             for m in messages:
                 if not m.message:
                     continue
-                if _is_message_processed(ch, m.id):
-                    continue
-                if not is_relevant(m.message):
-                    continue
-                parsed = parse_message(m.message)
-                if parsed:
-                    save_event(parsed, m.message, ch, m.id)
+                await _process_one_message(ch, m.id, m.message)
         print("[Telegram] Catch-up scan complete ✓")
     except Exception as e:
         print(f"[Telegram] Catch-up error: {e}")
