@@ -1,31 +1,27 @@
 """
-blind_box_detect.py - v3
-────────────────────────
-Approach mới: thay vì query wallet (bị giới hạn vì router có triệu tx),
-dùng Binance Alpha token list API để detect token mới.
+blind_box_detect.py - v4 (stable)
+──────────────────────────────────
+Kết hợp 2 tín hiệu:
+  1. Router wallet monitoring (Moralis, đã proven hoạt động)
+     → bắt token TRƯỚC khi Binance công bố (early signal)
+  2. Binance Alpha official list cross-check
+     → xác nhận token đã/sắp chính thức (confidence bonus)
 
-Logic:
-1. Lấy danh sách token hiện tại từ Binance Alpha API
-2. So với lần trước (cache) → token nào mới xuất hiện = candidate
-3. Score dựa trên: thời gian xuất hiện, amount pattern, market data
-4. Kết hợp với pending event để rank
-
-Không cần BSCScan hay Moralis wallet query nữa.
+Áp dụng cho mọi loại event: airdrop thường, blind box, alpha box.
 """
 
 import os
 import time
-import json
 import requests
 from datetime import datetime, timezone, timedelta
 
 MORALIS_API_KEY = os.getenv("MORALIS_API_KEY", "")
 MORALIS_BASE    = "https://deep-index.moralis.io/api/v2.2"
 
-BINANCE_ALPHA_API = (
-    "https://www.binance.com/bapi/defi/v1/public/wallet-direct/"
-    "buw/wallet/cex/alpha/all/token/list"
-)
+ROUTER_WALLETS = [
+    "0x6aba0315493b7e6989041c91181337b662fb1b90",  # Alpha 2.0 Router
+    "0x73d8bd54f7cf5fab43fe4ef40a62d390644946db",  # Alpha 2.0 Router Proxy
+]
 
 SESSION = requests.Session()
 SESSION.headers.update({
@@ -34,151 +30,127 @@ SESSION.headers.update({
     "Referer": "https://www.binance.com/",
 })
 
-# Cache token list theo thời gian
-_prev_token_snapshot: dict = {}   # contract → token_info (lần trước)
-_curr_token_snapshot: dict = {}   # contract → token_info (hiện tại)
-_snapshot_ts: float = 0
-SNAPSHOT_TTL = 60  # refresh mỗi 60 giây
+_alpha_token_map: dict = {}
+_alpha_ts: float = 0
+ALPHA_TTL = 300
+
+TYPICAL_AMOUNTS = [50, 100, 160, 200, 226, 250, 300, 400, 500, 800, 1000, 2000, 5000]
 
 
-def _fetch_alpha_token_list() -> dict:
-    """Lấy toàn bộ token list từ Binance Alpha. Return dict contract → info."""
-    try:
-        r = SESSION.get(BINANCE_ALPHA_API, timeout=15)
-        r.raise_for_status()
-        tokens = r.json().get("data", [])
-        result = {}
-        for t in tokens:
-            contract = (t.get("contractAddress") or "").lower().strip()
-            symbol   = (t.get("symbol") or "").strip()
-            if contract and len(contract) > 10:
-                result[contract] = {
-                    "symbol":    symbol,
-                    "name":      t.get("name") or symbol,
-                    "price":     float(t.get("price") or 0),
-                    "market_cap": float(t.get("marketCap") or 0),
-                    "fdv":       float(t.get("fdv") or 0),
-                    "chain_id":  str(t.get("chainId") or "56"),
-                    "fetched_at": datetime.now(timezone.utc).isoformat(),
-                }
-        return result
-    except Exception as e:
-        print(f"[blind_box] Alpha API error: {e}")
-        return {}
-
-
-def _get_token_recent_transfers(contract: str, limit: int = 20) -> list:
-    """
-    Lấy transfers gần nhất của 1 token cụ thể từ Moralis.
-    Dễ hơn nhiều so với query wallet có triệu tx.
-    """
-    if not MORALIS_API_KEY:
-        return []
+def _refresh_alpha_list():
+    global _alpha_token_map, _alpha_ts
+    if time.time() - _alpha_ts < ALPHA_TTL:
+        return
     try:
         r = SESSION.get(
-            f"{MORALIS_BASE}/erc20/{contract}/transfers",
+            "https://www.binance.com/bapi/defi/v1/public/wallet-direct/buw/wallet/cex/alpha/all/token/list",
+            timeout=15
+        )
+        r.raise_for_status()
+        tokens = r.json().get("data", [])
+        _alpha_token_map = {}
+        for t in tokens:
+            sym = (t.get("symbol") or "").upper()
+            contract = (t.get("contractAddress") or "").lower()
+            if sym:
+                _alpha_token_map[sym] = contract
+        _alpha_ts = time.time()
+        print(f"[blind_box] Alpha list refreshed: {len(_alpha_token_map)} tokens")
+    except Exception as e:
+        print(f"[blind_box] Alpha list error: {e}")
+
+
+def _in_alpha_list(symbol: str, contract: str) -> bool:
+    c = _alpha_token_map.get(symbol.upper())
+    if c and contract and c == contract.lower():
+        return True
+    return symbol.upper() in _alpha_token_map
+
+
+def _load_known_contracts(supabase) -> set:
+    contracts = set()
+    try:
+        rows = supabase.table("alpha_events").select("contract_address").execute().data
+        for r in rows:
+            addr = r.get("contract_address") or ""
+            if len(addr) > 10:
+                contracts.add(addr.lower())
+    except Exception as e:
+        print(f"[blind_box] Load alpha_events error: {e}")
+    try:
+        rows = supabase.table("blind_box_candidates").select("contract_address").execute().data
+        for r in rows:
+            addr = r.get("contract_address") or ""
+            if len(addr) > 10:
+                contracts.add(addr.lower())
+    except Exception as e:
+        print(f"[blind_box] Load candidates error: {e}")
+    return contracts
+
+
+def _get_wallet_transfers(wallet: str, limit: int = 100) -> list:
+    """Lấy transfers gần nhất — KHÔNG dùng from_date (gây lỗi 400)."""
+    try:
+        r = SESSION.get(
+            f"{MORALIS_BASE}/{wallet}/erc20/transfers",
             params={"chain": "bsc", "limit": limit, "order": "DESC"},
             headers={"X-API-Key": MORALIS_API_KEY},
-            timeout=10
+            timeout=15
         )
-        if r.ok:
-            return r.json().get("result", [])
+        r.raise_for_status()
+        result = r.json().get("result", [])
+        print(f"[blind_box] Moralis {wallet[:10]}...: {len(result)} transfers")
+        return result
+    except Exception as e:
+        print(f"[blind_box] Moralis error ({wallet[:10]}...): {e}")
         return []
-    except Exception:
-        return []
 
 
-def _check_router_involvement(contract: str) -> dict:
-    """
-    Kiểm tra token có được transfer vào/ra router wallet không.
-    Dùng Moralis token transfer API (query theo contract, không theo wallet).
-    """
-    ROUTER_WALLETS = {
-        "0x6aba0315493b7e6989041c91181337b662fb1b90",
-        "0x73d8bd54f7cf5fab43fe4ef40a62d390644946db",
-    }
+def _score_candidate(symbol: str, contract: str, amount: float,
+                      tx_time_str: str, is_spam: bool, verified: bool,
+                      in_both: bool, now: datetime) -> int:
+    score = 40
 
-    result = {
-        "router_involved": False,
-        "router_wallet":   None,
-        "transfer_amount": 0,
-        "transfer_time":   None,
-        "hours_ago":       None,
-    }
+    if is_spam:
+        score -= 30
+    if amount > 100_000_000:
+        score -= 20
+    try:
+        symbol.encode('ascii')
+    except UnicodeEncodeError:
+        score -= 15
 
-    txns = _get_token_recent_transfers(contract, limit=50)
-    now  = datetime.now(timezone.utc)
-
-    for tx in txns:
-        to_addr   = (tx.get("to_address") or "").lower()
-        from_addr = (tx.get("from_address") or "").lower()
-
-        if to_addr in ROUTER_WALLETS or from_addr in ROUTER_WALLETS:
-            result["router_involved"] = True
-            result["router_wallet"]   = to_addr if to_addr in ROUTER_WALLETS else from_addr
-
-            # Parse amount
-            try:
-                decimals = int(tx.get("token_decimals") or 18)
-                val = float(tx.get("value_decimal") or tx.get("value") or "0")
-                if "value_decimal" not in tx:
-                    val = val / (10 ** decimals)
-                result["transfer_amount"] = val
-            except Exception:
-                pass
-
-            # Parse time
-            ts = tx.get("block_timestamp", "")
-            if ts:
-                try:
-                    tx_dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
-                    result["transfer_time"] = tx_dt.isoformat()
-                    result["hours_ago"] = (now - tx_dt).total_seconds() / 3600
-                except Exception:
-                    pass
-            break  # Chỉ cần tx đầu tiên liên quan router
-
-    return result
-
-
-def _score_token(token_info: dict, router_info: dict, is_new: bool) -> int:
-    """
-    Tính confidence score 0-100.
-    """
-    score = 30  # base
-
-    price = token_info.get("price", 0)
-    mc    = token_info.get("market_cap", 0)
-
-    # Token mới xuất hiện trong Alpha list
-    if is_new:
-        score += 25
-
-    # Có liên quan đến router wallet
-    if router_info.get("router_involved"):
-        score += 30
-        hours_ago = router_info.get("hours_ago")
-        if hours_ago is not None:
-            if hours_ago <= 3:   score += 15
-            elif hours_ago <= 6: score += 10
-            elif hours_ago <= 12: score += 5
-
-    # Market cap thấp = token mới, chưa pump = potential
-    if 0 < mc < 5_000_000:    score += 10
-    elif 5_000_000 <= mc < 50_000_000: score += 5
-
-    # Có giá
-    if price > 0:
+    if _in_alpha_list(symbol, contract):
+        score += 35
+    if in_both:
+        score += 15
+    if verified:
         score += 5
+
+    if tx_time_str:
+        try:
+            tx_dt = datetime.fromisoformat(tx_time_str.replace("Z", "+00:00"))
+            hours_ago = (now - tx_dt).total_seconds() / 3600
+            if hours_ago <= 3:    score += 15
+            elif hours_ago <= 6:  score += 10
+            elif hours_ago <= 12: score += 5
+        except Exception:
+            pass
+
+    for typical in TYPICAL_AMOUNTS:
+        n_users = amount / typical if typical else 0
+        if 5_000 <= n_users <= 2_000_000:
+            score += 10
+            break
 
     return max(0, min(100, score))
 
 
 def run_detection(supabase) -> list:
-    """Entry point."""
-    global _prev_token_snapshot, _curr_token_snapshot, _snapshot_ts
+    if not MORALIS_API_KEY:
+        print("[blind_box] MORALIS_API_KEY not set, skipping")
+        return []
 
-    # Kiểm tra có pending event không
     try:
         pending = supabase.table("alpha_events") \
             .select("id, created_at") \
@@ -192,114 +164,108 @@ def run_detection(supabase) -> list:
         print("[blind_box] No pending events, skipping scan")
         return []
 
-    print(f"[blind_box] {len(pending)} pending event(s) → scanning Alpha token list...")
+    print(f"[blind_box] {len(pending)} pending event(s) → scanning routers...")
 
-    # Snapshot trước
-    _prev_token_snapshot = dict(_curr_token_snapshot)
-
-    # Fetch token list mới
-    new_snapshot = _fetch_alpha_token_list()
-    if not new_snapshot:
-        print("[blind_box] Alpha API returned empty, skip")
-        return []
-
-    _curr_token_snapshot = new_snapshot
-    _snapshot_ts = time.time()
-    print(f"[blind_box] Alpha list: {len(new_snapshot)} tokens")
-
-    # Load known contracts
-    known = set()
-    try:
-        rows1 = supabase.table("alpha_events").select("contract_address").execute().data
-        rows2 = supabase.table("blind_box_candidates").select("contract_address").execute().data
-        for r in rows1 + rows2:
-            addr = r.get("contract_address") or ""
-            if len(addr) > 10:
-                known.add(addr.lower())
-    except Exception as e:
-        print(f"[blind_box] Load known error: {e}")
-
+    _refresh_alpha_list()
+    known = _load_known_contracts(supabase)
     print(f"[blind_box] Known contracts: {len(known)}")
 
-    # First run: chưa có snapshot trước → không thể so sánh, bỏ qua lần này
-    if not _prev_token_snapshot:
-        print("[blind_box] First run — no previous snapshot to compare, skipping (will detect diffs from next run)")
-        return []
-
-    # Tìm token THỰC SỰ MỚI: có trong snapshot hiện tại nhưng KHÔNG có ở lần trước
-    new_contracts = set(new_snapshot.keys()) - set(_prev_token_snapshot.keys()) - known
-    print(f"[blind_box] New tokens since last snapshot: {len(new_contracts)}")
-
-    if not new_contracts:
-        print("[blind_box] No new tokens detected")
-        return []
-
-    # Giới hạn tối đa 15 candidates để tránh quá nhiều Moralis calls
-    new_contracts = list(new_contracts)[:15]
-
-    candidates = []
     now = datetime.now(timezone.utc)
+    event_id = pending[0]["id"]
 
-    for contract in new_contracts:
-        info = new_snapshot[contract]
+    wallet_txns = {}
+    all_candidates = {}
 
-        # Check router involvement qua Moralis token transfer API
-        router_info = {}
-        if MORALIS_API_KEY:
-            router_info = _check_router_involvement(contract)
-            time.sleep(0.2)  # rate limit
+    for wallet in ROUTER_WALLETS:
+        txns = _get_wallet_transfers(wallet, limit=100)
+        time.sleep(0.3)
+        wallet_txns[wallet] = txns
 
-        score = _score_token(info, router_info, is_new=True)
+        for tx in txns:
+            contract = (tx.get("address") or "").lower()
+            symbol   = tx.get("token_symbol") or ""
+            name     = tx.get("token_name") or ""
+            to_addr  = (tx.get("to_address") or "").lower()
+            decimals = int(tx.get("token_decimals") or 18)
+            is_spam  = tx.get("possible_spam", False)
+            verified = tx.get("verified_contract", False)
+            tx_time  = tx.get("block_timestamp")
 
-        candidates.append({
-            "contract":        contract,
-            "symbol":          info["symbol"],
-            "name":            info["name"],
-            "price":           info["price"],
-            "market_cap":      info["market_cap"],
-            "fdv":             info["fdv"],
-            "chain_id":        info["chain_id"],
-            "is_new":          True,
-            "router_involved": router_info.get("router_involved", False),
-            "router_wallet":   router_info.get("router_wallet"),
-            "transfer_amount": router_info.get("transfer_amount", 0),
-            "transfer_time":   router_info.get("transfer_time"),
-            "hours_ago":       router_info.get("hours_ago"),
-            "confidence_score": score,
-            "event_id":        pending[0]["id"] if pending else None,
-        })
+            if to_addr not in [w.lower() for w in ROUTER_WALLETS]:
+                continue
+            if contract in known or len(contract) < 10:
+                continue
 
-    if not candidates:
+            try:
+                val = float(tx.get("value_decimal") or "0")
+                if not tx.get("value_decimal"):
+                    val = float(tx.get("value") or "0") / (10 ** decimals)
+            except Exception:
+                val = 0
+
+            if is_spam or val > 1_000_000_000 or val < 500:
+                continue
+            try:
+                symbol.encode('ascii')
+            except UnicodeEncodeError:
+                continue
+            if not (2 <= len(symbol) <= 12):
+                continue
+            skip = {"USDT","USDC","BUSD","BNB","WBNB","ETH","WETH","CAKE","DAI"}
+            if symbol.upper() in skip:
+                continue
+
+            if contract not in all_candidates:
+                all_candidates[contract] = {
+                    "contract": contract, "symbol": symbol, "name": name,
+                    "amount": val, "tx_time": tx_time,
+                    "is_spam": is_spam, "verified": verified,
+                    "wallets": {wallet},
+                }
+            else:
+                all_candidates[contract]["wallets"].add(wallet)
+                if val > all_candidates[contract]["amount"]:
+                    all_candidates[contract]["amount"] = val
+
+    if not all_candidates:
         print("[blind_box] No new candidates detected")
         return []
 
-    # Sort by score
-    candidates.sort(key=lambda x: x["confidence_score"], reverse=True)
+    scored = []
+    for contract, info in all_candidates.items():
+        in_both = len(info["wallets"]) >= 2
+        score = _score_candidate(
+            info["symbol"], contract, info["amount"], info["tx_time"],
+            info["is_spam"], info["verified"], in_both, now
+        )
+        info["confidence_score"] = score
+        info["in_both"] = in_both
+        info["in_alpha_list"] = _in_alpha_list(info["symbol"], contract)
+        scored.append(info)
+
+    scored.sort(key=lambda x: x["confidence_score"], reverse=True)
 
     print(f"\n[blind_box] === CANDIDATES RANKED ===")
-    for c in candidates[:10]:  # top 10
-        router_tag = "🔗router" if c["router_involved"] else "      "
-        new_tag    = "🆕" if c["is_new"] else "  "
-        hours_str  = f"{c['hours_ago']:.1f}h ago" if c["hours_ago"] else "      "
-        print(f"  [{c['confidence_score']:3d}%] {new_tag} {router_tag} {c['symbol']:10s} | ${c['price']:.6f} | MC=${c['market_cap']:>12,.0f} | {hours_str}")
+    for c in scored[:15]:
+        both = "✓✓" if c["in_both"] else "✓ "
+        alpha = "🔥ALPHA" if c["in_alpha_list"] else "      "
+        print(f"  [{c['confidence_score']:3d}%] {both} {alpha} {c['symbol']:10s} | {c['name'][:20]:20s} | {c['amount']:>15,.0f}")
 
-    # Save top candidates vào Supabase
     saved = []
-    for c in candidates[:20]:  # save top 20
+    for c in scored[:20]:
         try:
             supabase.table("blind_box_candidates").upsert({
                 "contract_address":  c["contract"],
                 "symbol":            c["symbol"],
                 "name":              c["name"],
-                "amount_received":   c.get("transfer_amount") or 0,
-                "detected_wallet":   c.get("router_wallet") or "alpha_list",
-                "confirmed_both":    False,
-                "price_usd":         c["price"] or None,
-                "market_cap":        c["market_cap"] or None,
+                "amount_received":   c["amount"],
+                "detected_wallet":   "both" if c["in_both"] else list(c["wallets"])[0],
+                "confirmed_both":    c["in_both"],
                 "status":            "candidate",
                 "confidence_score":  c["confidence_score"],
-                "alpha_event_id":    c.get("event_id"),
-                "detected_at":       datetime.now(timezone.utc).isoformat(),
+                "in_alpha_list":     c["in_alpha_list"],
+                "alpha_event_id":    event_id,
+                "detected_at":       now.isoformat(),
             }, on_conflict="contract_address").execute()
             saved.append(c)
         except Exception as e:
