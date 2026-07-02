@@ -94,6 +94,45 @@ def run_poll():
     except Exception as e:
         return {"success": False, "error": str(e)}
 
+@app.get("/catchup")
+def catchup():
+    """
+    Quét lại N tin nhắn gần nhất trong mỗi channel,
+    parse và lưu những tin bị miss trong lúc bot restart/deploy.
+    """
+    import asyncio
+
+    if telegram_loop is None:
+        return {"error": "Telegram loop not ready yet, try again in a few seconds"}
+
+    async def _catchup():
+        results = []
+        for ch in CHANNELS:
+            try:
+                entity = await client.get_entity(ch)
+                messages = await client.get_messages(entity, limit=15)
+                for m in messages:
+                    if not m.message:
+                        continue
+                    parsed = parse_message(m.message)
+                    if parsed:
+                        save_event(parsed, m.message, ch, m.id)
+                        results.append({
+                            "channel": ch, "msg_id": m.id,
+                            "date": m.date.isoformat() if m.date else None,
+                            "parsed": parsed
+                        })
+            except Exception as e:
+                results.append({"channel": ch, "error": str(e)})
+        return results
+
+    try:
+        future = asyncio.run_coroutine_threadsafe(_catchup(), telegram_loop)
+        result = future.result(timeout=30)
+        return {"success": True, "processed": result}
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
 @app.get("/debug/channels")
 def debug_channels():
     """
@@ -197,12 +236,29 @@ async def on_message(event):
     else:
         print("[skip] Không liên quan Alpha hoặc thiếu event_type")
 
+async def _run_catchup_on_start():
+    """Quét lại tin gần nhất mỗi khi bot khởi động/reconnect, tránh miss tin lúc restart."""
+    try:
+        for ch in CHANNELS:
+            entity = await client.get_entity(ch)
+            messages = await client.get_messages(entity, limit=10)
+            for m in messages:
+                if not m.message:
+                    continue
+                parsed = parse_message(m.message)
+                if parsed:
+                    save_event(parsed, m.message, ch, m.id)
+        print("[Telegram] Catch-up scan complete ✓")
+    except Exception as e:
+        print(f"[Telegram] Catch-up error: {e}")
+
 async def start_telegram():
     await client.start(phone=os.getenv("TELEGRAM_PHONE"))
     telegram_status["connected"] = True
     telegram_status["last_error"] = None
     print("[Telegram] Connected ✓")
     print(f"[Telegram] Monitoring: {CHANNELS}")
+    await _run_catchup_on_start()
     await client.run_until_disconnected()
 
 telegram_loop = None
