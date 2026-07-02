@@ -183,6 +183,42 @@ Announcement:
     return {}
 
 
+# Symbol/project_name không hợp lệ (Gemini hay hallucinate mấy cái này)
+INVALID_SYMBOLS = {"USDT", "USDC", "BNB", "BUSD", "BTC", "ETH", "N/A", "NONE", "NULL"}
+INVALID_PROJECT_NAMES = {"BINANCE", "BINANCE ALPHA", "BINANCE WALLET", "N/A", "NONE"}
+
+def _sanity_check(result: dict) -> dict:
+    """Loại bỏ field bị Gemini hallucinate rõ ràng sai logic."""
+    # Symbol không hợp lệ
+    sym = (result.get("symbol") or "").upper()
+    if sym in INVALID_SYMBOLS:
+        result["symbol"] = None
+
+    # Project name không hợp lệ
+    pname = (result.get("project_name") or "").upper()
+    if pname in INVALID_PROJECT_NAMES:
+        result["project_name"] = None
+
+    # event_time_utc năm không hợp lý (phải là năm nay hoặc năm sau)
+    et = result.get("event_time_utc")
+    if et:
+        try:
+            from datetime import datetime
+            year = int(str(et)[:4])
+            current_year = datetime.now().year
+            if year < current_year or year > current_year + 1:
+                result["event_time_utc"] = None
+        except Exception:
+            result["event_time_utc"] = None
+
+    # amount_per_user quá nhỏ bất thường (Gemini hallucinate "1")
+    amt = result.get("amount_per_user")
+    if amt is not None and amt < 1:
+        result["amount_per_user"] = None
+
+    return result
+
+
 def parse_message(text: str) -> dict | None:
     if not is_relevant(text):
         return None
@@ -199,6 +235,7 @@ def parse_message(text: str) -> dict | None:
     if missing:
         print("[Parser] Missing fields → use Gemini")
         gemini_result = parse_with_gemini(text)
+        gemini_result = _sanity_check(gemini_result)
         result = {**gemini_result, **result}
 
     if not result.get("event_type"):
