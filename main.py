@@ -106,6 +106,8 @@ def catchup():
         return {"error": "Telegram loop not ready yet, try again in a few seconds"}
 
     async def _catchup():
+        from alpha_parser import is_relevant
+        from storage import _is_message_processed
         results = []
         for ch in CHANNELS:
             try:
@@ -113,6 +115,12 @@ def catchup():
                 messages = await client.get_messages(entity, limit=15)
                 for m in messages:
                     if not m.message:
+                        continue
+                    # Skip nếu đã xử lý (tránh phí gọi Gemini lại)
+                    if _is_message_processed(ch, m.id):
+                        continue
+                    # Lọc trước bằng keyword, tránh gọi Gemini cho tin không liên quan
+                    if not is_relevant(m.message):
                         continue
                     parsed = parse_message(m.message)
                     if parsed:
@@ -238,12 +246,18 @@ async def on_message(event):
 
 async def _run_catchup_on_start():
     """Quét lại tin gần nhất mỗi khi bot khởi động/reconnect, tránh miss tin lúc restart."""
+    from alpha_parser import is_relevant
+    from storage import _is_message_processed
     try:
         for ch in CHANNELS:
             entity = await client.get_entity(ch)
             messages = await client.get_messages(entity, limit=10)
             for m in messages:
                 if not m.message:
+                    continue
+                if _is_message_processed(ch, m.id):
+                    continue
+                if not is_relevant(m.message):
                     continue
                 parsed = parse_message(m.message)
                 if parsed:
