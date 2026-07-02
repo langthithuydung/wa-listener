@@ -112,32 +112,43 @@ def _load_known_contracts(supabase) -> set:
 
 # ── Fetch transfers với time filter ──────────────────────────────────
 def _get_transfers_since(wallet: str, since_dt: datetime, limit: int = 200) -> list:
-    """Lấy token transfers từ wallet kể từ since_dt."""
+    """
+    Lấy 200 transfers mới nhất của wallet,
+    sau đó filter theo block_timestamp >= since_dt trong Python.
+    (Moralis free tier không hỗ trợ from_date filter)
+    """
     now = datetime.now(timezone.utc)
-
-    # Moralis free tier: chỉ query trong 24h gần nhất
-    # Nếu since_dt quá cũ → clamp về 24h trước
+    # Clamp: không lookback quá 24h
     max_lookback = now - timedelta(hours=24)
-    if since_dt < max_lookback:
-        since_dt = max_lookback
-
-    # Moralis dùng Unix timestamp (seconds)
-    since_ts = int(since_dt.timestamp())
+    cutoff = max(since_dt, max_lookback)
 
     try:
         r = SESSION.get(
             f"{MORALIS_BASE}/{wallet}/erc20/transfers",
-            params={
-                "chain":      "bsc",
-                "limit":      limit,
-                "order":      "DESC",
-                "from_date":  since_ts,
-            },
+            params={"chain": "bsc", "limit": limit, "order": "DESC"},
             headers={"X-API-Key": MORALIS_API_KEY},
             timeout=15
         )
         r.raise_for_status()
-        return r.json().get("result", [])
+        all_txns = r.json().get("result", [])
+
+        # Filter theo block_timestamp trong Python
+        filtered = []
+        for tx in all_txns:
+            ts = tx.get("block_timestamp", "")
+            if not ts:
+                filtered.append(tx)
+                continue
+            try:
+                tx_dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+                if tx_dt >= cutoff:
+                    filtered.append(tx)
+            except Exception:
+                filtered.append(tx)
+
+        print(f"[blind_box] Wallet {wallet[:10]}...: {len(filtered)}/{len(all_txns)} transfers since {cutoff.strftime('%H:%M')} UTC")
+        return filtered
+
     except Exception as e:
         print(f"[blind_box] Moralis error ({wallet[:10]}...): {e}")
         return []
