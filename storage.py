@@ -81,9 +81,12 @@ def _mark_message_processed(source_channel: str, msg_id: int):
         pass  # đã tồn tại (unique constraint) → bỏ qua
 
 
-def save_event(parsed: dict, raw_text: str, source_channel: str, msg_id: int):
+def save_event(parsed: dict, raw_text: str, source_channel: str, msg_id: int, msg_date=None):
     symbol     = parsed.get("symbol") or None
     event_type = parsed.get("event_type")
+    # Dùng thời gian THẬT của tin nhắn Telegram nếu có, không dùng giờ hiện tại
+    # (quan trọng cho catch-up: tránh tin cũ bị coi là "mới" trong tính expire)
+    effective_created_at = msg_date.isoformat() if msg_date else datetime.now(timezone.utc).isoformat()
 
     # ── Bước 0: Check msg_id đã xử lý chưa (chặn catch-up re-save tin cũ) ──
     if _is_message_processed(source_channel, msg_id):
@@ -176,7 +179,7 @@ def save_event(parsed: dict, raw_text: str, source_channel: str, msg_id: int):
         "source_channel": source_channel,
         "source_msg_id":  msg_id,
         "raw_text":       raw_text,
-        "created_at":     datetime.now(timezone.utc).isoformat()
+        "created_at":     effective_created_at
     }
 
     try:

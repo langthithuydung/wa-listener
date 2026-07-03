@@ -95,11 +95,12 @@ def run_poll():
         return {"success": False, "error": str(e)}
 
 
-async def _process_one_message(channel: str, msg_id: int, text: str):
+async def _process_one_message(channel: str, msg_id: int, text: str, msg_date=None):
     """
     Xử lý 1 tin nhắn: check đã xử lý chưa → relevant → parse → save.
     LUÔN đánh dấu processed sau khi check xong (kể cả khi không lưu được event),
     để tránh gọi Gemini lặp lại vô hạn cho tin không đủ field.
+    msg_date: thời gian THẬT tin được đăng trên Telegram (quan trọng cho catch-up).
     """
     from alpha_parser import is_relevant
     from storage import _is_message_processed, _mark_message_processed
@@ -108,17 +109,15 @@ async def _process_one_message(channel: str, msg_id: int, text: str):
         return None
 
     if not is_relevant(text):
-        # Không liên quan Alpha → đánh dấu luôn, không cần Gemini
         _mark_message_processed(channel, msg_id)
         return None
 
-    parsed = parse_message(text)  # có thể gọi Gemini bên trong
+    parsed = parse_message(text)
 
-    # Đánh dấu processed NGAY sau khi parse xong, bất kể kết quả
     _mark_message_processed(channel, msg_id)
 
     if parsed:
-        save_event(parsed, text, channel, msg_id)
+        save_event(parsed, text, channel, msg_id, msg_date=msg_date)
         return parsed
     return None
 
@@ -142,7 +141,7 @@ def catchup():
                 for m in messages:
                     if not m.message:
                         continue
-                    parsed = await _process_one_message(ch, m.id, m.message)
+                    parsed = await _process_one_message(ch, m.id, m.message, msg_date=m.date)
                     if parsed:
                         results.append({
                             "channel": ch, "msg_id": m.id,
@@ -256,7 +255,7 @@ async def on_message(event):
     print(f"\n[MSG] #{msg_id} from @{channel}")
     print(f"[TEXT] {text[:300]}")
 
-    parsed = await _process_one_message(channel, msg_id, text)
+    parsed = await _process_one_message(channel, msg_id, text, msg_date=event.message.date)
     if parsed:
         print(f"[PARSED] {parsed}")
     else:
@@ -271,7 +270,7 @@ async def _run_catchup_on_start():
             for m in messages:
                 if not m.message:
                     continue
-                await _process_one_message(ch, m.id, m.message)
+                await _process_one_message(ch, m.id, m.message, msg_date=m.date)
         print("[Telegram] Catch-up scan complete ✓")
     except Exception as e:
         print(f"[Telegram] Catch-up error: {e}")
