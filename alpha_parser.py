@@ -187,7 +187,7 @@ Announcement:
 INVALID_SYMBOLS = {"USDT", "USDC", "BNB", "BUSD", "BTC", "ETH", "N/A", "NONE", "NULL"}
 INVALID_PROJECT_NAMES = {"BINANCE", "BINANCE ALPHA", "BINANCE WALLET", "N/A", "NONE"}
 
-def _sanity_check(result: dict) -> dict:
+def _sanity_check(result: dict, original_text: str = "") -> dict:
     """Loại bỏ field bị Gemini hallucinate rõ ràng sai logic."""
     # Symbol không hợp lệ
     sym = (result.get("symbol") or "").upper()
@@ -216,6 +216,21 @@ def _sanity_check(result: dict) -> dict:
     if amt is not None and amt < 1:
         result["amount_per_user"] = None
 
+    # amount_per_user PHẢI thực sự xuất hiện trong text gốc, nếu không → hallucination
+    amt = result.get("amount_per_user")
+    if amt is not None and original_text:
+        amt_int = int(amt) if amt == int(amt) else amt
+        if str(amt_int) not in original_text and str(amt) not in original_text:
+            print(f"[Parser] Sanity: amount_per_user={amt} không xuất hiện trong text gốc → loại bỏ")
+            result["amount_per_user"] = None
+
+    # points_threshold cũng phải xuất hiện trong text
+    pts = result.get("points_threshold")
+    if pts is not None and original_text:
+        if str(int(pts)) not in original_text:
+            print(f"[Parser] Sanity: points_threshold={pts} không xuất hiện trong text gốc → loại bỏ")
+            result["points_threshold"] = None
+
     return result
 
 
@@ -235,7 +250,7 @@ def parse_message(text: str) -> dict | None:
     if missing:
         print("[Parser] Missing fields → use Gemini")
         gemini_result = parse_with_gemini(text)
-        gemini_result = _sanity_check(gemini_result)
+        gemini_result = _sanity_check(gemini_result, original_text=text)
         result = {**gemini_result, **result}
 
     if not result.get("event_type"):
