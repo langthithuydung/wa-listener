@@ -136,23 +136,29 @@ def catchup():
 
     async def _catchup():
         from storage import get_channel_checkpoint
+        from alpha_parser import is_relevant
         results = []
+        scanned_preview = []
         for ch in CHANNELS:
             try:
                 entity = await client.get_entity(ch)
                 checkpoint = get_channel_checkpoint(ch)
 
                 if checkpoint > 0:
-                    # Quét TẤT CẢ tin sau checkpoint, không giới hạn số lượng cố định
                     messages = await client.get_messages(entity, min_id=checkpoint, limit=200)
                 else:
-                    # Lần đầu chưa có checkpoint → chỉ lấy 15 tin gần nhất làm điểm khởi đầu
                     messages = await client.get_messages(entity, limit=15)
 
-                # get_messages trả về DESC (mới nhất trước) → xử lý theo thứ tự thời gian tăng dần
                 for m in reversed(messages):
                     if not m.message:
                         continue
+                    # Log preview mọi tin relevant, kể cả không tạo được event
+                    if is_relevant(m.message):
+                        scanned_preview.append({
+                            "channel": ch, "msg_id": m.id,
+                            "date": m.date.isoformat() if m.date else None,
+                            "preview": m.message[:200]
+                        })
                     parsed = await _process_one_message(ch, m.id, m.message, msg_date=m.date)
                     if parsed:
                         results.append({
@@ -162,12 +168,12 @@ def catchup():
                         })
             except Exception as e:
                 results.append({"channel": ch, "error": str(e)})
-        return results
+        return {"saved_events": results, "all_relevant_scanned": scanned_preview}
 
     try:
         future = asyncio.run_coroutine_threadsafe(_catchup(), telegram_loop)
         result = future.result(timeout=90)
-        return {"success": True, "processed": result}
+        return {"success": True, **result}
     except Exception as e:
         return {"success": False, "error": str(e) or type(e).__name__}
 
