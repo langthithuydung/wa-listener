@@ -171,6 +171,36 @@ def catchup():
     except Exception as e:
         return {"success": False, "error": str(e) or type(e).__name__}
 
+@app.get("/debug/range")
+def debug_range():
+    """
+    Xem TOÀN BỘ nội dung tin nhắn trong khoảng msg_id 1470-1490
+    để tìm chính xác tin ACU/WMTX reveal thật.
+    """
+    import asyncio
+
+    if telegram_loop is None:
+        return {"error": "Telegram loop not ready"}
+
+    async def _check():
+        entity = await client.get_entity("binance_wallet_announcements")
+        messages = await client.get_messages(entity, min_id=1469, max_id=1491, limit=30)
+        return [
+            {
+                "id": m.id,
+                "date": m.date.isoformat() if m.date else None,
+                "text": m.message or "(no text)"
+            }
+            for m in messages
+        ]
+
+    try:
+        future = asyncio.run_coroutine_threadsafe(_check(), telegram_loop)
+        result = future.result(timeout=20)
+        return {"success": True, "messages": result}
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
 @app.get("/debug/channels")
 def debug_channels():
     """
