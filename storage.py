@@ -45,17 +45,27 @@ def _find_pending_match(parsed: dict) -> dict | None:
         points     = parsed.get("points_threshold")
         symbol     = parsed.get("symbol")
 
+        now = datetime.now(timezone.utc)
         for row in rows:
             if row.get("event_type") != event_type:
                 continue
+
+            # Ràng buộc thời gian: reveal phải đến trong vòng 12h sau khi pending được tạo
+            # (Binance Alpha Box thường reveal trong vài giờ, không bao giờ để cách ngày)
+            try:
+                row_created = datetime.fromisoformat(row["created_at"].replace("Z", "+00:00"))
+                hours_since_pending = (now - row_created).total_seconds() / 3600
+                if hours_since_pending > 12:
+                    continue  # pending đã quá cũ, không phải cùng 1 sự kiện
+            except Exception:
+                continue
+
             # Match CHẶT: bắt buộc điểm số trùng khớp (cho phép sai lệch do decay)
             row_points = row.get("points_threshold")
             if points is not None and row_points is not None:
-                # Decay -5 điểm/5 phút, cho phép lệch tối đa 20 điểm
                 if abs(row_points - points) <= 20:
                     return row
                 continue
-            # Nếu row pending không có points_threshold để so → không match liều lĩnh
             continue
 
         return None
@@ -86,6 +96,34 @@ def _mark_message_processed(source_channel: str, msg_id: int):
         }).execute()
     except Exception:
         pass  # đã tồn tại (unique constraint) → bỏ qua
+
+
+def get_channel_checkpoint(source_channel: str) -> int:
+    """Lấy msg_id lớn nhất đã xử lý của channel — dùng làm min_id khi quét tiếp."""
+    try:
+        rows = supabase.table("channel_checkpoints") \
+            .select("last_msg_id") \
+            .eq("source_channel", source_channel) \
+            .execute().data
+        if rows:
+            return rows[0]["last_msg_id"]
+    except Exception as e:
+        print(f"[storage] get_checkpoint error: {e}")
+    return 0
+
+
+def update_channel_checkpoint(source_channel: str, msg_id: int):
+    """Cập nhật checkpoint nếu msg_id mới lớn hơn."""
+    try:
+        current = get_channel_checkpoint(source_channel)
+        if msg_id > current:
+            supabase.table("channel_checkpoints").upsert({
+                "source_channel": source_channel,
+                "last_msg_id": msg_id,
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+            }, on_conflict="source_channel").execute()
+    except Exception as e:
+        print(f"[storage] update_checkpoint error: {e}")
 
 
 def save_event(parsed: dict, raw_text: str, source_channel: str, msg_id: int, msg_date=None):

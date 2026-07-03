@@ -98,23 +98,25 @@ def run_poll():
 async def _process_one_message(channel: str, msg_id: int, text: str, msg_date=None):
     """
     Xử lý 1 tin nhắn: check đã xử lý chưa → relevant → parse → save.
-    LUÔN đánh dấu processed sau khi check xong (kể cả khi không lưu được event),
-    để tránh gọi Gemini lặp lại vô hạn cho tin không đủ field.
-    msg_date: thời gian THẬT tin được đăng trên Telegram (quan trọng cho catch-up).
+    LUÔN đánh dấu processed + cập nhật checkpoint sau khi check xong,
+    để tránh gọi Gemini lặp lại vô hạn và đảm bảo catch-up không bỏ sót tin.
+    msg_date: thời gian THẬT tin được đăng trên Telegram.
     """
     from alpha_parser import is_relevant
-    from storage import _is_message_processed, _mark_message_processed
+    from storage import _is_message_processed, _mark_message_processed, update_channel_checkpoint
 
     if _is_message_processed(channel, msg_id):
         return None
 
     if not is_relevant(text):
         _mark_message_processed(channel, msg_id)
+        update_channel_checkpoint(channel, msg_id)
         return None
 
     parsed = parse_message(text)
 
     _mark_message_processed(channel, msg_id)
+    update_channel_checkpoint(channel, msg_id)
 
     if parsed:
         save_event(parsed, text, channel, msg_id, msg_date=msg_date)
@@ -133,12 +135,22 @@ def catchup():
         return {"error": "Telegram loop not ready yet, try again in a few seconds"}
 
     async def _catchup():
+        from storage import get_channel_checkpoint
         results = []
         for ch in CHANNELS:
             try:
                 entity = await client.get_entity(ch)
-                messages = await client.get_messages(entity, limit=15)
-                for m in messages:
+                checkpoint = get_channel_checkpoint(ch)
+
+                if checkpoint > 0:
+                    # Quét TẤT CẢ tin sau checkpoint, không giới hạn số lượng cố định
+                    messages = await client.get_messages(entity, min_id=checkpoint, limit=200)
+                else:
+                    # Lần đầu chưa có checkpoint → chỉ lấy 15 tin gần nhất làm điểm khởi đầu
+                    messages = await client.get_messages(entity, limit=15)
+
+                # get_messages trả về DESC (mới nhất trước) → xử lý theo thứ tự thời gian tăng dần
+                for m in reversed(messages):
                     if not m.message:
                         continue
                     parsed = await _process_one_message(ch, m.id, m.message, msg_date=m.date)
@@ -262,12 +274,19 @@ async def on_message(event):
         print("[skip] Không liên quan Alpha hoặc thiếu event_type")
 
 async def _run_catchup_on_start():
-    """Quét lại tin gần nhất mỗi khi bot khởi động/reconnect, tránh miss tin lúc restart."""
+    """Quét lại tin từ checkpoint mỗi khi bot khởi động/reconnect, tránh miss tin lúc restart."""
+    from storage import get_channel_checkpoint
     try:
         for ch in CHANNELS:
             entity = await client.get_entity(ch)
-            messages = await client.get_messages(entity, limit=10)
-            for m in messages:
+            checkpoint = get_channel_checkpoint(ch)
+
+            if checkpoint > 0:
+                messages = await client.get_messages(entity, min_id=checkpoint, limit=200)
+            else:
+                messages = await client.get_messages(entity, limit=15)
+
+            for m in reversed(messages):
                 if not m.message:
                     continue
                 await _process_one_message(ch, m.id, m.message, msg_date=m.date)
