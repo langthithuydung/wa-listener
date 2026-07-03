@@ -48,8 +48,15 @@ def _find_pending_match(parsed: dict) -> dict | None:
         for row in rows:
             if row.get("event_type") != event_type:
                 continue
-            if symbol or (points and row.get("points_threshold") == points):
-                return row
+            # Match CHẶT: bắt buộc điểm số trùng khớp (cho phép sai lệch do decay)
+            row_points = row.get("points_threshold")
+            if points is not None and row_points is not None:
+                # Decay -5 điểm/5 phút, cho phép lệch tối đa 20 điểm
+                if abs(row_points - points) <= 20:
+                    return row
+                continue
+            # Nếu row pending không có points_threshold để so → không match liều lĩnh
+            continue
 
         return None
     except Exception as e:
@@ -101,6 +108,7 @@ def save_event(parsed: dict, raw_text: str, source_channel: str, msg_id: int, ms
             try:
                 update_data = {
                     "symbol":           symbol,
+                    "symbols_all":      parsed.get("symbols_all") or pending_row.get("symbols_all"),
                     "project_name":     parsed.get("project_name") or pending_row.get("project_name"),
                     "points_threshold": parsed.get("points_threshold") or pending_row.get("points_threshold"),
                     "points_cost":      parsed.get("points_cost") or pending_row.get("points_cost"),
@@ -156,6 +164,7 @@ def save_event(parsed: dict, raw_text: str, source_channel: str, msg_id: int, ms
     data = {
         "project_name":   parsed.get("project_name"),
         "symbol":         symbol,
+        "symbols_all":    parsed.get("symbols_all"),
         "event_type":     event_type,
         "points_threshold": parsed.get("points_threshold"),
         "points_cost":    parsed.get("points_cost"),
