@@ -18,14 +18,19 @@ MIN_INTERVAL = 2.0  # giây giữa 2 lần gọi Gemini
 _cooldown_until = 0.0
 COOLDOWN_SECONDS = 300  # 5 phút
 
-KEYWORDS = [
-    "alpha", "airdrop", "tge", "token generation",
-    "claim", "alpha points", "binance wallet", "collect"
-]
+# "binance wallet" đơn lẻ quá rộng → match nhầm với campaign quảng cáo không liên quan Alpha
+# Bắt buộc phải có "alpha" HOẶC ("airdrop"/"tge" + ngữ cảnh cụ thể)
+STRONG_KEYWORDS = ["alpha points", "binance alpha", "alpha box", "alpha events"]
+MEDIUM_KEYWORDS = ["airdrop", "tge", "token generation"]
 
 def is_relevant(text: str) -> bool:
     text_lower = text.lower()
-    return any(kw in text_lower for kw in KEYWORDS)
+    if any(kw in text_lower for kw in STRONG_KEYWORDS):
+        return True
+    # airdrop/tge chỉ tính khi ĐI KÈM "alpha" (loại các airdrop campaign chung chung)
+    if any(kw in text_lower for kw in MEDIUM_KEYWORDS) and "alpha" in text_lower:
+        return True
+    return False
 
 
 SYMBOL_BLACKLIST = {
