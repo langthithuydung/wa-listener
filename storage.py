@@ -126,6 +126,37 @@ def update_channel_checkpoint(source_channel: str, msg_id: int):
         print(f"[storage] update_checkpoint error: {e}")
 
 
+def _confirm_matching_candidates(alpha_event_id: int, symbol: str, symbols_all: str = None):
+    """
+    Khi Binance công bố chính thức, tìm blind_box_candidates đã phát hiện on-chain
+    trước đó (giống alpha123.uk) khớp symbol → đánh dấu confirmed + link event.
+    """
+    all_syms = (symbols_all or symbol or "").split(",")
+    all_syms = [s.strip().upper() for s in all_syms if s.strip()]
+    if not all_syms:
+        return
+
+    try:
+        for sym in all_syms:
+            rows = supabase.table("blind_box_candidates") \
+                .select("id, symbol") \
+                .eq("symbol", sym) \
+                .eq("status", "candidate") \
+                .execute().data
+            for row in rows:
+                supabase.table("blind_box_candidates") \
+                    .update({
+                        "status": "confirmed",
+                        "alpha_event_id": alpha_event_id,
+                        "confirmed_at": datetime.now(timezone.utc).isoformat(),
+                    }) \
+                    .eq("id", row["id"]) \
+                    .execute()
+                print(f"[storage] Confirmed prediction: {sym} → event id={alpha_event_id} ✓")
+    except Exception as e:
+        print(f"[storage] Confirm candidates error: {e}")
+
+
 def save_event(parsed: dict, raw_text: str, source_channel: str, msg_id: int, msg_date=None):
     symbol     = parsed.get("symbol") or None
     event_type = parsed.get("event_type")
@@ -171,6 +202,10 @@ def save_event(parsed: dict, raw_text: str, source_channel: str, msg_id: int, ms
                     .eq("id", pending_row["id"]) \
                     .execute()
                 print(f"[storage] Updated pending→upcoming: id={pending_row['id']} symbol={symbol} ✓")
+
+                # Confirm blind box candidates đã phát hiện on-chain trước đó khớp với event này
+                _confirm_matching_candidates(pending_row["id"], symbol, parsed.get("symbols_all"))
+
                 refresh_r2_snapshot()
                 return
             except Exception as e:

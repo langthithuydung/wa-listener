@@ -18,6 +18,11 @@ from datetime import datetime, timezone, timedelta
 MORALIS_API_KEY = os.getenv("MORALIS_API_KEY", "")
 MORALIS_BASE    = "https://deep-index.moralis.io/api/v2.2"
 
+try:
+    from enricher import enrich_token
+except Exception:
+    enrich_token = None
+
 ROUTER_WALLETS = [
     "0x6aba0315493b7e6989041c91181337b662fb1b90",  # Alpha 2.0 Router
     "0x73d8bd54f7cf5fab43fe4ef40a62d390644946db",  # Alpha 2.0 Router Proxy
@@ -253,6 +258,18 @@ def run_detection(supabase) -> list:
 
     saved = []
     for c in scored[:20]:
+        # Chỉ enrich giá cho candidate có confidence cao (tiết kiệm API call)
+        price = None
+        value_usd = None
+        if enrich_token and c["confidence_score"] >= 60:
+            try:
+                enriched = enrich_token(c["symbol"], c["name"])
+                price = enriched.get("price_snapshot")
+                if price and c["amount"]:
+                    value_usd = round(c["amount"] * price, 4)
+            except Exception as e:
+                print(f"[blind_box] Price enrich error {c['symbol']}: {e}")
+
         try:
             supabase.table("blind_box_candidates").upsert({
                 "contract_address":  c["contract"],
@@ -264,6 +281,8 @@ def run_detection(supabase) -> list:
                 "status":            "candidate",
                 "confidence_score":  c["confidence_score"],
                 "in_alpha_list":     c["in_alpha_list"],
+                "price_usd":         price,
+                "predicted_value_usd": value_usd,
                 "alpha_event_id":    event_id,
                 "detected_at":       now.isoformat(),
             }, on_conflict="contract_address").execute()
