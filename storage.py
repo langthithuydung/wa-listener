@@ -158,17 +158,19 @@ def _confirm_matching_candidates(alpha_event_id: int, symbol: str, symbols_all: 
 
 
 def save_event(parsed: dict, raw_text: str, source_channel: str, msg_id: int, msg_date=None):
+    """
+    LƯU Ý QUAN TRỌNG: hàm này KHÔNG tự check/đánh dấu processed_messages nữa.
+    Việc dedupe theo msg_id đã được _process_one_message() (main.py) lo TRƯỚC
+    khi gọi hàm này rồi — nếu save_event tự check lại ở đây, nó sẽ luôn thấy
+    "đã processed" (vì _process_one_message vừa mark xong ngay trước khi gọi
+    save_event) và tự thoát, KHÔNG BAO GIỜ lưu được gì vào Supabase. Đây
+    chính là bug đã khiến hệ thống không lưu được sự kiện nào suốt từ 30/6.
+    """
     symbol     = parsed.get("symbol") or None
     event_type = parsed.get("event_type")
     # Dùng thời gian THẬT của tin nhắn Telegram nếu có, không dùng giờ hiện tại
     # (quan trọng cho catch-up: tránh tin cũ bị coi là "mới" trong tính expire)
     effective_created_at = msg_date.isoformat() if msg_date else datetime.now(timezone.utc).isoformat()
-
-    # ── Bước 0: Check msg_id đã xử lý chưa (chặn catch-up re-save tin cũ) ──
-    if _is_message_processed(source_channel, msg_id):
-        print(f"[storage] Skip: msg_id={msg_id} already processed before")
-        return
-    _mark_message_processed(source_channel, msg_id)
 
     # ── Bước 1: Nếu có symbol → thử update row pending trước ─────────
     if symbol:
@@ -211,7 +213,8 @@ def save_event(parsed: dict, raw_text: str, source_channel: str, msg_id: int, ms
             except Exception as e:
                 print(f"[storage] Update pending error: {e}")
 
-    # ── Bước 2: Dedupe trước khi insert mới ──────────────────────────
+    # ── Bước 2: Dedupe THỰC SỰ trước khi insert mới (business dedupe, khác
+    #    với message-dedupe ở main.py) ─────────────────────────────────
     if symbol:
         try:
             existing = supabase.table("alpha_events") \
