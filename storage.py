@@ -275,6 +275,59 @@ def save_event(parsed: dict, raw_text: str, source_channel: str, msg_id: int, ms
         print(f"[storage] Insert error: {e}")
 
 
+def _append_ended_to_history(ended_events: list):
+    """
+    Tự động thêm các event vừa chuyển 'ended' vào history.json trên R2 —
+    KHÔNG cần chạy tay sync_alpha_history.py nữa. Script đó giờ đúng nghĩa
+    "dự phòng": chỉ dùng khi cần nạp dữ liệu lịch sử CŨ (trước khi bot tồn
+    tại) từ file airdrops.json bên ngoài, không còn liên quan gì tới luồng
+    realtime nữa.
+
+    Chống trùng bằng source_msg_id (mỗi tin Telegram chỉ có 1 msg_id duy
+    nhất) — vì hàm này được gọi lại nhiều lần (mỗi lần refresh_r2_snapshot),
+    phải đảm bảo không append lại event đã có sẵn trong history.json.
+    """
+    if not ended_events:
+        return
+    try:
+        r2 = get_r2_client()
+        try:
+            obj = r2.get_object(Bucket=BUCKET, Key="alpha-events/history.json")
+            history = json.loads(obj["Body"].read())
+            if not isinstance(history, list):
+                history = []
+        except Exception:
+            history = []  # chưa có file (lần đầu) → bắt đầu từ rỗng
+
+        existing_msg_ids = {
+            h.get("source_msg_id") for h in history
+            if h.get("source_msg_id") is not None
+        }
+
+        appended = 0
+        for e in ended_events:
+            msg_id = e.get("source_msg_id")
+            if msg_id is not None and msg_id in existing_msg_ids:
+                continue  # đã có trong history rồi
+            history.append(e)
+            if msg_id is not None:
+                existing_msg_ids.add(msg_id)
+            appended += 1
+
+        if appended:
+            r2.put_object(
+                Bucket=BUCKET,
+                Key="alpha-events/history.json",
+                Body=json.dumps(history, default=str, ensure_ascii=False,
+                                separators=(',', ':')).encode('utf-8'),
+                ContentType='application/json',
+                CacheControl='max-age=60'
+            )
+            print(f"[storage] Auto-appended {appended} ended event(s) → history.json ✓")
+    except Exception as e:
+        print(f"[storage] Append history error: {e}")
+
+
 # ── Ghi snapshot JSON lên R2 ─────────────────────────
 def refresh_r2_snapshot():
     try:
@@ -287,6 +340,7 @@ def refresh_r2_snapshot():
         pending  = [e for e in all_events if e["status"] == "pending"]
         upcoming = [e for e in all_events if e["status"] == "upcoming"]
         live     = [e for e in all_events if e["status"] == "live"]
+        ended    = [e for e in all_events if e["status"] == "ended"]
 
         # Blind box candidates — sort by confidence_score
         try:
@@ -298,7 +352,6 @@ def refresh_r2_snapshot():
         except Exception:
             candidates = []
 
-        # KHÔNG ghi đè history.json — do sync_alpha_history.py quản lý
         files = {
             "alpha-events/pending.json":    pending,
             "alpha-events/upcoming.json":   upcoming,
@@ -319,7 +372,11 @@ def refresh_r2_snapshot():
         for key, data in files.items():
             put(key, data)
 
-        print(f"[storage] R2 updated — pending={len(pending)}, upcoming={len(upcoming)}, live={len(live)}, blindbox={len(candidates)} ✓")
+        # Tự động merge event vừa 'ended' vào history.json — thay thế hoàn
+        # toàn việc phải chạy tay sync_alpha_history.py mỗi khi có sự kiện mới.
+        _append_ended_to_history(ended)
+
+        print(f"[storage] R2 updated — pending={len(pending)}, upcoming={len(upcoming)}, live={len(live)}, ended_synced={len(ended)}, blindbox={len(candidates)} ✓")
 
     except Exception as e:
         print(f"[storage] R2 error: {e}")
