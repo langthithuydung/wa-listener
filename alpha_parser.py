@@ -4,6 +4,7 @@ import re
 import time
 import urllib.request
 import urllib.error
+from datetime import datetime, timezone, date
 
 MODEL_NAME = "gemini-3.1-flash-lite"  # 2.0-flash-lite đã bị khai tử 1/6/2026
 
@@ -40,7 +41,44 @@ SYMBOL_BLACKLIST = {
     "SOL", "ARB", "BASE", "EVM",
 }
 
-def parse_with_regex(text: str) -> dict:
+
+def _parse_relative_event_time(text: str, msg_date=None) -> str | None:
+    """
+    Binance hay ghi giờ kiểu TƯƠNG ĐỐI: "today at 9:00 (UTC)",
+    "trade today at 10:00 (UTC)" — không có ngày cụ thể trong text.
+    Phải dùng NGÀY THẬT của tin nhắn Telegram (msg_date) làm mốc "today",
+    rồi ghép với giờ trong text để ra ISO datetime tuyệt đối.
+
+    Nếu không có msg_date (ví dụ gọi từ /test không có ngày thật) thì bỏ
+    qua, không đoán bừa ngày hiện tại của server (có thể sai múi giờ/lúc
+    chạy catch-up cho tin cũ).
+    """
+    if not msg_date:
+        return None
+
+    # Khớp: "today at 9:00 (UTC)" / "today at 09:00 UTC" / "trade today at 10:00(UTC)"
+    m = re.search(
+        r'today\s+at\s+(\d{1,2}):(\d{2})\s*\(?\s*UTC\s*\)?',
+        text, re.IGNORECASE
+    )
+    if not m:
+        return None
+
+    hour, minute = int(m.group(1)), int(m.group(2))
+    if not (0 <= hour <= 23 and 0 <= minute <= 59):
+        return None
+
+    # msg_date từ Telethon luôn là datetime UTC-aware — lấy đúng NGÀY của
+    # tin nhắn đó làm "today", không dùng ngày giờ server hiện tại.
+    event_date: date = msg_date.date() if hasattr(msg_date, "date") else msg_date
+    event_dt = datetime(
+        event_date.year, event_date.month, event_date.day,
+        hour, minute, tzinfo=timezone.utc
+    )
+    return event_dt.isoformat()
+
+
+def parse_with_regex(text: str, msg_date=None) -> dict:
     result = {}
 
     for m in re.finditer(r'\(([A-Z]{2,10})\)|\$([A-Z]{2,10})', text):
@@ -89,6 +127,11 @@ def parse_with_regex(text: str) -> dict:
         result["event_type"] = "tge"
     elif "airdrop" in lower:
         result["event_type"] = "airdrop"
+
+    # Giờ tương đối "today at HH:MM (UTC)" → ISO datetime tuyệt đối
+    event_time = _parse_relative_event_time(text, msg_date)
+    if event_time:
+        result["event_time_utc"] = event_time
 
     return result
 
@@ -164,7 +207,9 @@ Fields:
 - points_threshold (number or null)
 - points_cost (number or null)
 - decay_rule (string or null)
-- event_time_utc (string ISO8601 or null)
+- event_time_utc (string ISO8601 or null — CHỈ điền nếu text có NGÀY CỤ THỂ,
+  KHÔNG được tự suy đoán ngày cho các cụm "today"/"tomorrow" vì bạn không
+  biết chính xác tin được đăng ngày nào)
 
 Announcement:
 {text}
@@ -208,7 +253,6 @@ def _sanity_check(result: dict, original_text: str = "") -> dict:
     et = result.get("event_time_utc")
     if et:
         try:
-            from datetime import datetime
             year = int(str(et)[:4])
             current_year = datetime.now().year
             if year < current_year or year > current_year + 1:
@@ -239,11 +283,18 @@ def _sanity_check(result: dict, original_text: str = "") -> dict:
     return result
 
 
-def parse_message(text: str) -> dict | None:
+def parse_message(text: str, msg_date=None) -> dict | None:
+    """
+    msg_date: thời gian THẬT tin được đăng trên Telegram (từ Telethon
+    message.date) — dùng để quy đổi các mốc giờ tương đối kiểu
+    "today at 9:00 (UTC)" thành ngày giờ tuyệt đối chính xác. Không truyền
+    (None) vẫn hoạt động bình thường, chỉ là event_time_utc sẽ trống cho
+    các tin dạng "today at..." (an toàn hơn là đoán sai).
+    """
     if not is_relevant(text):
         return None
 
-    result = parse_with_regex(text)
+    result = parse_with_regex(text, msg_date=msg_date)
 
     missing = (
         not result.get("project_name")
