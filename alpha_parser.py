@@ -81,11 +81,19 @@ def _parse_relative_event_time(text: str, msg_date=None) -> str | None:
 def parse_with_regex(text: str, msg_date=None) -> dict:
     result = {}
 
+    # Symbol: (COLLECT) hoặc $COLLECT — bỏ qua các từ trong blacklist.
+    # Alpha Box có thể airdrop NHIỀU token cùng lúc (VD: ON + MPLX) → phải
+    # thu thập TẤT CẢ symbol tìm được, không chỉ lấy cái đầu tiên rồi dừng.
+    all_symbols = []
     for m in re.finditer(r'\(([A-Z]{2,10})\)|\$([A-Z]{2,10})', text):
         candidate = m.group(1) or m.group(2)
-        if candidate not in SYMBOL_BLACKLIST:
-            result["symbol"] = candidate
-            break
+        if candidate not in SYMBOL_BLACKLIST and candidate not in all_symbols:
+            all_symbols.append(candidate)
+
+    if all_symbols:
+        result["symbol"] = all_symbols[0]  # symbol chính, tương thích cột hiện có
+        if len(all_symbols) > 1:
+            result["symbols_all"] = ",".join(all_symbols)  # đầy đủ cho Alpha Box nhiều token
 
     points = re.search(
         r'(?:at\s+least\s+)?(\d+)\s*(?:binance\s*)?alpha\s*points?',
