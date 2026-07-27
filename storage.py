@@ -219,9 +219,50 @@ def save_event(parsed: dict, raw_text: str, source_channel: str, msg_id: int, ms
     if symbol:
         try:
             existing = supabase.table("alpha_events") \
-                .select("id").eq("symbol", symbol).execute()
+                .select("*").eq("symbol", symbol).neq("status", "ended").execute()
             if existing.data:
-                print(f"[storage] Skip duplicate symbol: {symbol}")
+                existing_row = existing.data[0]
+
+                # Nếu event đã có đủ info cốt lõi rồi → đúng là tin trùng lặp
+                # (VD Binance đăng lại), bỏ qua như cũ.
+                has_full_info = (
+                    existing_row.get("points_threshold")
+                    and existing_row.get("amount_per_user")
+                    and existing_row.get("event_time")
+                )
+                if has_full_info:
+                    print(f"[storage] Skip duplicate symbol: {symbol}")
+                    return
+
+                # Ngược lại: symbol đã được công bố trước (VD Tin 1 chỉ có tên
+                # token, "further details announced soon") nhưng còn thiếu
+                # points/amount/event_time → tin mới (Tin 2) bổ sung phần còn
+                # thiếu. Đây chính là case AEON: Tin 1 insert upcoming với
+                # symbol nhưng toàn field khác NULL, _find_pending_match ở
+                # Bước 1 không bắt được vì nó chỉ tìm status="pending", còn
+                # row này đã là "upcoming" rồi → phải merge riêng ở đây.
+                update_data = {
+                    "symbols_all":      parsed.get("symbols_all") or existing_row.get("symbols_all"),
+                    "tokens_detail":    parsed.get("tokens_detail") or existing_row.get("tokens_detail"),
+                    "project_name":     parsed.get("project_name") or existing_row.get("project_name"),
+                    "points_threshold": parsed.get("points_threshold") or existing_row.get("points_threshold"),
+                    "points_cost":      parsed.get("points_cost") or existing_row.get("points_cost"),
+                    "amount_per_user":  parsed.get("amount_per_user") or existing_row.get("amount_per_user"),
+                    "total_amount":     parsed.get("total_amount") or existing_row.get("total_amount"),
+                    "decay_rule":       parsed.get("decay_rule") or existing_row.get("decay_rule"),
+                    "event_time":       parsed.get("event_time_utc") or existing_row.get("event_time"),
+                    "chain_id":         parsed.get("chain_id") or existing_row.get("chain_id") or "56",
+                    "chain_name":       parsed.get("chain_name") or existing_row.get("chain_name") or "BSC",
+                    "phase":            parsed.get("phase") or existing_row.get("phase"),
+                    "raw_text":         raw_text,
+                    "source_msg_id":    msg_id,
+                }
+                supabase.table("alpha_events") \
+                    .update(update_data) \
+                    .eq("id", existing_row["id"]) \
+                    .execute()
+                print(f"[storage] Enriched existing event: id={existing_row['id']} symbol={symbol} ✓")
+                refresh_r2_snapshot()
                 return
         except Exception as e:
             print(f"[storage] Dedupe check error: {e}")
