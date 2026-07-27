@@ -277,54 +277,6 @@ for the specific airdrop tokens and the latest updates.
     return {"success": parsed is not None, "parsed": parsed, "note": "dry-run, không ghi vào Supabase"}
 
 
-@app.get("/test-fix")
-def test_fix():
-    """
-    Verify fix bug AEON: symbol đã tồn tại (status upcoming) nhưng thiếu
-    points_threshold/amount_per_user/event_time → tin thứ 2 phải ENRICH
-    thêm, không được bị "Skip duplicate symbol" bỏ qua như trước.
-    Tạm thời, xoá route này sau khi verify xong.
-    """
-    from datetime import datetime, timezone
-    from alpha_parser import parse_message
-    from storage import save_event
-    import time as _time
-
-    import traceback
-    try:
-        now = datetime.now(timezone.utc)
-        sym = f"ZTEST{int(_time.time())}"  # symbol duy nhất mỗi lần gọi, tránh đụng data cũ
-
-        tin1 = (f"Binance Alpha will be the first platform to feature ZTest ({sym}) on July 27. "
-            "Eligible users can claim their airdrop using Binance Alpha Points on the Alpha "
-            "Events page once trading opens. Further details will be announced soon.")
-        tin2 = (f"Binance Alpha is the first platform to feature ZTest ({sym}), with Alpha debut and "
-            "trading starting on July 27, 2026, at 10:00 (UTC). Users with at least 245 Binance "
-            f"Alpha Points can claim an airdrop of 250 {sym} tokens on a first-come, first-served "
-            "basis. If the reward pool is not fully distributed, the score threshold will "
-            "automatically decrease by 5 points every 5 minutes. Please note that claiming the "
-            "airdrop will consume 15 Binance Alpha Points.")
-
-        p1 = parse_message(tin1, msg_date=now)
-        if not p1:
-            return {"success": False, "error": "parse_message(tin1) trả về None — parser không nhận diện được event_type/relevant", "p1": p1}
-        save_event(p1, tin1, "test_channel", int(_time.time() * 1000) % 999999999, msg_date=now)
-
-        p2 = parse_message(tin2, msg_date=now)
-        if not p2:
-            return {"success": False, "error": "parse_message(tin2) trả về None", "p1": p1, "p2": p2}
-        save_event(p2, tin2, "test_channel", int(_time.time() * 1000) % 999999999 + 1, msg_date=now)
-
-        from supabase import create_client
-        sb = create_client(os.getenv("SUPABASE_URL"), os.getenv("SUPABASE_KEY"))
-        row = sb.table("alpha_events").select("*").eq("symbol", sym).execute().data
-        if row:
-            sb.table("alpha_events").delete().eq("symbol", sym).execute()  # dọn ngay sau khi đọc
-        return {"success": True, "symbol": sym, "final_row": row}
-    except Exception as e:
-        return {"success": False, "error": str(e), "trace": traceback.format_exc()}
-
-
 # ── Telegram Listener ─────────────────────────────────
 client = TelegramClient("session_wave_alpha", API_ID, API_HASH)
 
