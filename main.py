@@ -290,29 +290,33 @@ def test_fix():
     from storage import save_event
     import time as _time
 
-    now = datetime.now(timezone.utc)
-    sym = f"ZTEST{int(_time.time())}"  # symbol duy nhất mỗi lần gọi, tránh đụng data cũ
+    import traceback
+    try:
+        now = datetime.now(timezone.utc)
+        sym = f"ZTEST{int(_time.time())}"  # symbol duy nhất mỗi lần gọi, tránh đụng data cũ
 
-    tin1 = f"Binance Alpha will be the first platform to feature ZTest ({sym}) on July 27."
-    tin2 = (f"Binance Alpha is the first platform to feature ZTest ({sym}), with Alpha debut and "
-        "trading starting on July 27, 2026, at 10:00 (UTC). Users with at least 245 Binance "
-        f"Alpha Points can claim an airdrop of 250 {sym} tokens on a first-come, first-served "
-        "basis. If the reward pool is not fully distributed, the score threshold will "
-        "automatically decrease by 5 points every 5 minutes. Please note that claiming the "
-        "airdrop will consume 15 Binance Alpha Points.")
+        tin1 = f"Binance Alpha will be the first platform to feature ZTest ({sym}) on July 27."
+        tin2 = (f"Binance Alpha is the first platform to feature ZTest ({sym}), with Alpha debut and "
+            "trading starting on July 27, 2026, at 10:00 (UTC). Users with at least 245 Binance "
+            f"Alpha Points can claim an airdrop of 250 {sym} tokens on a first-come, first-served "
+            "basis. If the reward pool is not fully distributed, the score threshold will "
+            "automatically decrease by 5 points every 5 minutes. Please note that claiming the "
+            "airdrop will consume 15 Binance Alpha Points.")
 
-    p1 = parse_message(tin1, msg_date=now)
-    save_event(p1, tin1, "test_channel", int(_time.time() * 1000) % 999999999, msg_date=now)
+        p1 = parse_message(tin1, msg_date=now)
+        save_event(p1, tin1, "test_channel", int(_time.time() * 1000) % 999999999, msg_date=now)
 
-    p2 = parse_message(tin2, msg_date=now)
-    save_event(p2, tin2, "test_channel", int(_time.time() * 1000) % 999999999 + 1, msg_date=now)
+        p2 = parse_message(tin2, msg_date=now)
+        save_event(p2, tin2, "test_channel", int(_time.time() * 1000) % 999999999 + 1, msg_date=now)
 
-    from supabase import create_client
-    sb = create_client(os.getenv("SUPABASE_URL"), os.getenv("SUPABASE_KEY"))
-    row = sb.table("alpha_events").select("*").eq("symbol", sym).execute().data
-    if row:
-        sb.table("alpha_events").delete().eq("symbol", sym).execute()  # dọn ngay sau khi đọc
-    return {"symbol": sym, "final_row": row}
+        from supabase import create_client
+        sb = create_client(os.getenv("SUPABASE_URL"), os.getenv("SUPABASE_KEY"))
+        row = sb.table("alpha_events").select("*").eq("symbol", sym).execute().data
+        if row:
+            sb.table("alpha_events").delete().eq("symbol", sym).execute()  # dọn ngay sau khi đọc
+        return {"success": True, "symbol": sym, "final_row": row}
+    except Exception as e:
+        return {"success": False, "error": str(e), "trace": traceback.format_exc()}
 
 
 # ── Telegram Listener ─────────────────────────────────
