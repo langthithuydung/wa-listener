@@ -35,15 +35,17 @@ SESSION.headers.update({
     "Referer": "https://www.binance.com/",
 })
 
-# Track announcement IDs đã xử lý để không duplicate
-_seen_announcement_ids: set = set()
-
-
 # ── JOB 1: Poll Binance Announcement API ─────────────────────────────
+POLLER_CHANNEL = "binance_announcement_api"
+
 def job_poll_announcements():
     """
     Gọi Binance Announcement API mỗi 3 phút.
     Bắt TGE/Pre-TGE/Alpha listing mà Telegram có thể miss.
+
+    Dedupe dùng bảng processed_messages BỀN VỮNG (Supabase), KHÔNG dùng
+    biến RAM — biến RAM sẽ mất mỗi lần Render restart, khiến job coi bài
+    cũ là "mới" và tự tạo lại pending rác liên tục (bug đã từng xảy ra).
     """
     try:
         r = SESSION.get(
@@ -54,31 +56,36 @@ def job_poll_announcements():
         r.raise_for_status()
         articles = r.json().get("data", {}).get("articles", [])
 
-        from alpha_parser import parse_message
-        from storage import save_event
+        from alpha_parser import parse_message, is_relevant
+        from storage import save_event, _is_message_processed, _mark_message_processed
 
         new_count = 0
         for article in articles:
             aid = str(article.get("id", ""))
-            if aid in _seen_announcement_ids:
+            if not aid:
                 continue
-            _seen_announcement_ids.add(aid)
+            msg_id = int(aid) if aid.isdigit() else abs(hash(aid)) % 999999999
+
+            if _is_message_processed(POLLER_CHANNEL, msg_id):
+                continue
 
             title = article.get("title", "")
             body  = article.get("body", "") or title
+            full_text = title + "\n" + body
 
-            # Chỉ quan tâm bài liên quan Alpha/TGE/Airdrop
-            keywords = ["alpha", "tge", "airdrop", "pre-tge", "prime sale", "wallet"]
-            if not any(kw in (title + body).lower() for kw in keywords):
+            if not is_relevant(full_text):
+                _mark_message_processed(POLLER_CHANNEL, msg_id)
                 continue
 
-            parsed = parse_message(title + "\n" + body)
+            parsed = parse_message(full_text)
+            _mark_message_processed(POLLER_CHANNEL, msg_id)
+
             if parsed:
                 save_event(
                     parsed=parsed,
-                    raw_text=title + "\n" + body,
-                    source_channel="binance_announcement_api",
-                    msg_id=int(aid) if aid.isdigit() else hash(aid) % 999999999
+                    raw_text=full_text,
+                    source_channel=POLLER_CHANNEL,
+                    msg_id=msg_id
                 )
                 new_count += 1
                 print(f"[poller] New from API: {title[:80]}")
@@ -95,11 +102,15 @@ def job_enrich_prices():
     """
     Mỗi 5 phút: lấy tất cả upcoming + pending có symbol
     → update contract_address, price_snapshot, value_usd, market_cap
+    → ĐỒNG THỜI enrich giá/contract cho TỪNG TOKEN trong tokens_detail
+      (Alpha Box nhiều token, VD: ON + MPLX cùng lúc) — trước đây chỉ
+      enrich symbol chính, các token phụ trong tokens_detail bị bỏ trống
+      contract/giá hoàn toàn.
     """
     try:
         supabase = _get_supabase()
         rows = supabase.table("alpha_events") \
-            .select("id, symbol, project_name, amount_per_user, contract_address, price_snapshot") \
+            .select("id, symbol, project_name, amount_per_user, contract_address, price_snapshot, tokens_detail") \
             .in_("status", ["upcoming", "live", "pending"]) \
             .not_.is_("symbol", "null") \
             .execute().data
@@ -114,29 +125,55 @@ def job_enrich_prices():
                 continue
 
             enriched = enrich_token(symbol, row.get("project_name"))
-            if not enriched:
-                continue
-
-            # Tính value_usd
-            price   = enriched.get("price_snapshot") or row.get("price_snapshot")
-            amount  = row.get("amount_per_user")
-            val_usd = compute_value_usd(amount, price)
 
             update_data = {}
-            if enriched.get("contract_address") and not row.get("contract_address"):
-                update_data["contract_address"] = enriched["contract_address"]
-            if enriched.get("price_snapshot"):
-                update_data["price_snapshot"] = enriched["price_snapshot"]
-            if enriched.get("market_cap"):
-                update_data["market_cap"] = enriched["market_cap"]
-            if enriched.get("fdv"):
-                update_data["fdv"] = enriched["fdv"]
-            if enriched.get("chain_id"):
-                update_data["chain_id"] = enriched["chain_id"]
-            if enriched.get("chain_name"):
-                update_data["chain_name"] = enriched["chain_name"]
-            if val_usd:
-                update_data["value_usd"] = val_usd
+            val_usd = None
+            if enriched:
+                price   = enriched.get("price_snapshot") or row.get("price_snapshot")
+                amount  = row.get("amount_per_user")
+                val_usd = compute_value_usd(amount, price)
+
+                if enriched.get("contract_address") and not row.get("contract_address"):
+                    update_data["contract_address"] = enriched["contract_address"]
+                if enriched.get("price_snapshot"):
+                    update_data["price_snapshot"] = enriched["price_snapshot"]
+                if enriched.get("market_cap"):
+                    update_data["market_cap"] = enriched["market_cap"]
+                if enriched.get("fdv"):
+                    update_data["fdv"] = enriched["fdv"]
+                if enriched.get("chain_id"):
+                    update_data["chain_id"] = enriched["chain_id"]
+                if enriched.get("chain_name"):
+                    update_data["chain_name"] = enriched["chain_name"]
+                if val_usd:
+                    update_data["value_usd"] = val_usd
+
+            # ── Enrich RIÊNG cho từng token trong tokens_detail (Alpha Box
+            # nhiều token) — mỗi token có contract/giá/value_usd của chính nó,
+            # tính theo tier_common (giá trị đại diện phổ biến nhất). ──
+            tokens_detail = row.get("tokens_detail")
+            if isinstance(tokens_detail, list) and tokens_detail:
+                new_tokens_detail = []
+                for t in tokens_detail:
+                    t_symbol = t.get("symbol")
+                    if not t_symbol:
+                        new_tokens_detail.append(t)
+                        continue
+                    t_enriched = enrich_token(t_symbol, None)
+                    time.sleep(0.4)  # tránh rate limit khi enrich nhiều token liên tiếp
+                    t_updated = dict(t)  # copy, giữ nguyên tier_common/tier_rare/tier_super_rare
+                    if t_enriched:
+                        t_price = t_enriched.get("price_snapshot")
+                        if t_enriched.get("contract_address"):
+                            t_updated["contract_address"] = t_enriched["contract_address"]
+                        if t_price:
+                            t_updated["price_snapshot"] = t_price
+                            # value_usd ước tính theo tier phổ biến nhất (Common)
+                            common = t.get("tier_common")
+                            if common is not None:
+                                t_updated["value_usd"] = round(common * t_price, 4)
+                    new_tokens_detail.append(t_updated)
+                update_data["tokens_detail"] = new_tokens_detail
 
             if update_data:
                 supabase.table("alpha_events") \
@@ -144,7 +181,8 @@ def job_enrich_prices():
                     .eq("id", row["id"]) \
                     .execute()
                 updated += 1
-                print(f"[enrich] {symbol}: price=${enriched.get('price_snapshot','?')}, value=${val_usd or '?'}")
+                detail_syms = [t.get("symbol") for t in tokens_detail] if tokens_detail else [symbol]
+                print(f"[enrich] {'+'.join(detail_syms)}: price=${enriched.get('price_snapshot','?') if enriched else '?'}, value=${val_usd or '?'}")
 
             time.sleep(0.5)  # Tránh rate limit
 

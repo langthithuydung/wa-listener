@@ -180,6 +180,7 @@ def save_event(parsed: dict, raw_text: str, source_channel: str, msg_id: int, ms
                 update_data = {
                     "symbol":           symbol,
                     "symbols_all":      parsed.get("symbols_all") or pending_row.get("symbols_all"),
+                    "tokens_detail":    parsed.get("tokens_detail") or pending_row.get("tokens_detail"),
                     "project_name":     parsed.get("project_name") or pending_row.get("project_name"),
                     "points_threshold": parsed.get("points_threshold") or pending_row.get("points_threshold"),
                     "points_cost":      parsed.get("points_cost") or pending_row.get("points_cost"),
@@ -241,6 +242,7 @@ def save_event(parsed: dict, raw_text: str, source_channel: str, msg_id: int, ms
         "project_name":   parsed.get("project_name"),
         "symbol":         symbol,
         "symbols_all":    parsed.get("symbols_all"),
+        "tokens_detail":  parsed.get("tokens_detail"),
         "event_type":     event_type,
         "points_threshold": parsed.get("points_threshold"),
         "points_cost":    parsed.get("points_cost"),

@@ -78,22 +78,68 @@ def _parse_relative_event_time(text: str, msg_date=None) -> str | None:
     return event_dt.isoformat()
 
 
+def _parse_multi_token_tiers(text: str) -> list[dict]:
+    """
+    Alpha Box nhiều token: mỗi token có 3 mức thưởng (Common/Rare/Super Rare).
+    Bắt pattern: "X, Y, or Z SYMBOL tokens" lặp lại cho từng token.
+    VD: "69, 86, or 244 EDGE tokens; 584, 729, or 2083 BEE tokens"
+    → [{"symbol":"EDGE","tier_common":69,"tier_rare":86,"tier_super_rare":244}, ...]
+
+    Thứ tự số tăng dần ứng với Common(80% pool, giá trị thấp nhất) →
+    Rare(15%) → Super Rare(5%, giá trị cao nhất) — đúng theo mô tả tier
+    trong thông báo Alpha Box gốc của Binance.
+    """
+    pattern = re.compile(
+        r'(\d[\d,]*)\s*,\s*(\d[\d,]*)\s*,?\s*or\s*(\d[\d,]*)\s+([A-Z]{2,10})\s+tokens?',
+        re.IGNORECASE
+    )
+    tokens = []
+    seen = set()
+    for m in pattern.finditer(text):
+        low, mid, high, symbol = m.groups()
+        sym = symbol.upper()
+        if sym in seen or sym in SYMBOL_BLACKLIST:
+            continue
+        seen.add(sym)
+        tokens.append({
+            "symbol": sym,
+            "tier_common": float(low.replace(",", "")),
+            "tier_rare": float(mid.replace(",", "")),
+            "tier_super_rare": float(high.replace(",", "")),
+        })
+    return tokens
+
+
 def parse_with_regex(text: str, msg_date=None) -> dict:
     result = {}
 
-    # Symbol: (COLLECT) hoặc $COLLECT — bỏ qua các từ trong blacklist.
-    # Alpha Box có thể airdrop NHIỀU token cùng lúc (VD: ON + MPLX) → phải
-    # thu thập TẤT CẢ symbol tìm được, không chỉ lấy cái đầu tiên rồi dừng.
-    all_symbols = []
-    for m in re.finditer(r'\(([A-Z]{2,10})\)|\$([A-Z]{2,10})', text):
-        candidate = m.group(1) or m.group(2)
-        if candidate not in SYMBOL_BLACKLIST and candidate not in all_symbols:
-            all_symbols.append(candidate)
+    # ── Alpha Box nhiều token: ưu tiên bắt theo tier reward trước (chính
+    # xác hơn nhiều so với chỉ quét symbol trong ngoặc đơn, vì nó đảm bảo
+    # symbol thực sự gắn với số lượng thưởng của chính nó, không lẫn lộn). ──
+    tokens_detail = _parse_multi_token_tiers(text)
 
-    if all_symbols:
-        result["symbol"] = all_symbols[0]  # symbol chính, tương thích cột hiện có
+    if tokens_detail:
+        result["tokens_detail"] = tokens_detail
+        all_symbols = [t["symbol"] for t in tokens_detail]
+        result["symbol"] = all_symbols[0]
         if len(all_symbols) > 1:
-            result["symbols_all"] = ",".join(all_symbols)  # đầy đủ cho Alpha Box nhiều token
+            result["symbols_all"] = ",".join(all_symbols)
+        # amount_per_user cho symbol CHÍNH — lấy tier phổ biến nhất (Common)
+        # làm giá trị đại diện, khớp với cách hệ thống hiển thị amount hiện có.
+        result["amount_per_user"] = tokens_detail[0]["tier_common"]
+    else:
+        # Fallback: không có pattern tier (airdrop 1 token thường, không phải
+        # Alpha Box nhiều loại) → quét symbol trong ngoặc đơn như cũ.
+        all_symbols = []
+        for m in re.finditer(r'\(([A-Z]{2,10})\)|\$([A-Z]{2,10})', text):
+            candidate = m.group(1) or m.group(2)
+            if candidate not in SYMBOL_BLACKLIST and candidate not in all_symbols:
+                all_symbols.append(candidate)
+
+        if all_symbols:
+            result["symbol"] = all_symbols[0]
+            if len(all_symbols) > 1:
+                result["symbols_all"] = ",".join(all_symbols)
 
     points = re.search(
         r'(?:at\s+least\s+)?(\d+)\s*(?:binance\s*)?alpha\s*points?',
@@ -102,18 +148,21 @@ def parse_with_regex(text: str, msg_date=None) -> dict:
     if points:
         result["points_threshold"] = int(points.group(1))
 
-    amount = re.search(
-        r'(?:airdrop\s+of\s+|claim\s+(?:an?\s+)?(?:airdrop\s+of\s+)?)?'
-        r'(\d[\d,]*)\s+[A-Z]{2,10}\s+tokens?',
-        text, re.IGNORECASE
-    )
-    if not amount:
+    # CHỈ chạy fallback này khi CHƯA có tokens_detail (Alpha Box nhiều token
+    # đã tự set amount_per_user chính xác ở trên rồi — không được ghi đè).
+    if "tokens_detail" not in result:
         amount = re.search(
-            r'(\d[\d,]*\.?\d*)\s*(?:tokens?|coins?)\s*per\s*user',
+            r'(?:airdrop\s+of\s+|claim\s+(?:an?\s+)?(?:airdrop\s+of\s+)?)?'
+            r'(\d[\d,]*)\s+[A-Z]{2,10}\s+tokens?',
             text, re.IGNORECASE
         )
-    if amount:
-        result["amount_per_user"] = float(amount.group(1).replace(",", ""))
+        if not amount:
+            amount = re.search(
+                r'(\d[\d,]*\.?\d*)\s*(?:tokens?|coins?)\s*per\s*user',
+                text, re.IGNORECASE
+            )
+        if amount:
+            result["amount_per_user"] = float(amount.group(1).replace(",", ""))
 
     decay = re.search(
         r'(?:score\s+)?threshold\s+will\s+(?:automatically\s+)?decrease\s+by\s+'
