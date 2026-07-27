@@ -295,7 +295,9 @@ def test_fix():
         now = datetime.now(timezone.utc)
         sym = f"ZTEST{int(_time.time())}"  # symbol duy nhất mỗi lần gọi, tránh đụng data cũ
 
-        tin1 = f"Binance Alpha will be the first platform to feature ZTest ({sym}) on July 27."
+        tin1 = (f"Binance Alpha will be the first platform to feature ZTest ({sym}) on July 27. "
+            "Eligible users can claim their airdrop using Binance Alpha Points on the Alpha "
+            "Events page once trading opens. Further details will be announced soon.")
         tin2 = (f"Binance Alpha is the first platform to feature ZTest ({sym}), with Alpha debut and "
             "trading starting on July 27, 2026, at 10:00 (UTC). Users with at least 245 Binance "
             f"Alpha Points can claim an airdrop of 250 {sym} tokens on a first-come, first-served "
@@ -304,9 +306,13 @@ def test_fix():
             "airdrop will consume 15 Binance Alpha Points.")
 
         p1 = parse_message(tin1, msg_date=now)
+        if not p1:
+            return {"success": False, "error": "parse_message(tin1) trả về None — parser không nhận diện được event_type/relevant", "p1": p1}
         save_event(p1, tin1, "test_channel", int(_time.time() * 1000) % 999999999, msg_date=now)
 
         p2 = parse_message(tin2, msg_date=now)
+        if not p2:
+            return {"success": False, "error": "parse_message(tin2) trả về None", "p1": p1, "p2": p2}
         save_event(p2, tin2, "test_channel", int(_time.time() * 1000) % 999999999 + 1, msg_date=now)
 
         from supabase import create_client
