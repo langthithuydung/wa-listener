@@ -318,6 +318,62 @@ def save_event(parsed: dict, raw_text: str, source_channel: str, msg_id: int, ms
         print(f"[storage] Insert error: {e}")
 
 
+def _upsert_ended_to_all_events(ended_events: list):
+    """
+    Đẩy các event vừa 'ended' vào alpha-events/all.json — file mà
+    sync_listing_prices.py (GitHub Actions) đọc để tự động fetch
+    listing_price/VWAP/ATH qua Binance internal klines API.
+
+    LÝ DO CẦN HÀM NÀY: all.json trước giờ chỉ được nạp bởi pipeline
+    backfill cũ (fetch_alpha.py chạy 1 lần cho data lịch sử), hoàn toàn
+    không biết gì về event realtime mà wa-listener bắt qua Telegram/
+    Supabase. Hậu quả: các event mới (VD AEON, TRUTH...) không bao giờ
+    được sync_listing_prices.py xử lý → mãi không có giá claim/đỉnh
+    ("đang đồng bộ..." vĩnh viễn), và tệ hơn — lần tới script đó chạy,
+    nó ghi đè history.json bằng list derive TỪ all.json, nên các event
+    không có trong all.json sẽ bị XOÁ khỏi history.json luôn.
+
+    Idempotent bằng source_msg_id, giống _append_ended_to_history.
+    """
+    if not ended_events:
+        return
+    try:
+        r2 = get_r2_client()
+        try:
+            obj = r2.get_object(Bucket=BUCKET, Key="alpha-events/all.json")
+            all_events = json.loads(obj["Body"].read())
+            if not isinstance(all_events, list):
+                all_events = []
+        except Exception:
+            all_events = []
+
+        existing_msg_ids = {
+            e.get("source_msg_id") for e in all_events
+            if e.get("source_msg_id") is not None
+        }
+
+        upserted = 0
+        for e in ended_events:
+            msg_id = e.get("source_msg_id")
+            if msg_id is not None and msg_id in existing_msg_ids:
+                continue  # đã có sẵn (VD sync_listing_prices.py đã enrich rồi)
+            all_events.append(e)
+            if msg_id is not None:
+                existing_msg_ids.add(msg_id)
+            upserted += 1
+
+        if upserted:
+            r2.put_object(
+                Bucket=BUCKET,
+                Key="alpha-events/all.json",
+                Body=json.dumps(all_events, default=str).encode("utf-8"),
+                ContentType="application/json"
+            )
+            print(f"[storage] Upserted {upserted} event(s) → all.json (chờ sync_listing_prices.py enrich giá) ✓")
+    except Exception as e:
+        print(f"[storage] Upsert all.json error: {e}")
+
+
 def _append_ended_to_history(ended_events: list):
     """
     Tự động thêm các event vừa chuyển 'ended' vào history.json trên R2 —
@@ -428,6 +484,7 @@ def refresh_r2_snapshot():
 
         # Tự động merge event vừa 'ended' vào history.json — thay thế hoàn
         # toàn việc phải chạy tay sync_alpha_history.py mỗi khi có sự kiện mới.
+        _upsert_ended_to_all_events(ended)
         _append_ended_to_history(ended)
 
         print(f"[storage] R2 updated — pending={len(pending)}, upcoming={len(upcoming)}, live={len(live)}, ended_synced={len(ended)}, blindbox={len(candidates)} ✓")
