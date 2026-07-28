@@ -347,29 +347,41 @@ def _upsert_ended_to_all_events(ended_events: list):
         except Exception:
             all_events = []
 
-        existing_msg_ids = {
-            e.get("source_msg_id") for e in all_events
+        existing_by_msg_id = {
+            e.get("source_msg_id"): e for e in all_events
             if e.get("source_msg_id") is not None
         }
 
         upserted = 0
+        updated = 0
         for e in ended_events:
             msg_id = e.get("source_msg_id")
-            if msg_id is not None and msg_id in existing_msg_ids:
-                continue  # đã có sẵn (VD sync_listing_prices.py đã enrich rồi)
+            existing = existing_by_msg_id.get(msg_id) if msg_id is not None else None
+
+            if existing is not None:
+                # Đã có sẵn — nhưng nếu lần trước thiếu contract_address
+                # (job enrich_token lúc đó chưa tìm ra), mà giờ Supabase đã
+                # có giá trị mới (VD tự sửa tay/enrich lại), thì cập nhật
+                # lại để sync_listing_prices.py có cơ hội enrich giá VWAP/
+                # ATH — nếu không, entry cũ thiếu contract sẽ bị bỏ qua
+                # (dòng "and e.get('contract_address')" trong enrich_events)
+                # vĩnh viễn, không bao giờ tự retry được.
+                if not existing.get("contract_address") and e.get("contract_address"):
+                    existing["contract_address"] = e["contract_address"]
+                    updated += 1
+                continue
+
             all_events.append(e)
-            if msg_id is not None:
-                existing_msg_ids.add(msg_id)
             upserted += 1
 
-        if upserted:
+        if upserted or updated:
             r2.put_object(
                 Bucket=BUCKET,
                 Key="alpha-events/all.json",
                 Body=json.dumps(all_events, default=str).encode("utf-8"),
                 ContentType="application/json"
             )
-            print(f"[storage] Upserted {upserted} event(s) → all.json (chờ sync_listing_prices.py enrich giá) ✓")
+            print(f"[storage] all.json: {upserted} event(s) mới, {updated} event(s) cập nhật contract_address (chờ sync_listing_prices.py enrich giá) ✓")
     except Exception as e:
         print(f"[storage] Upsert all.json error: {e}")
 
