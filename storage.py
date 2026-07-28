@@ -357,25 +357,27 @@ def _append_ended_to_history(ended_events: list):
                 existing_msg_ids.add(msg_id)
             appended += 1
 
+        # Luôn sort lại toàn bộ history theo thời gian MỚI NHẤT lên đầu,
+        # bất kể lần này có append thêm event mới hay không — vì các event
+        # đã append từ TRƯỚC KHI có fix sort này vẫn đang nằm sai vị trí
+        # (cuối mảng) trong file history.json hiện có trên R2. Nếu chỉ sort
+        # trong nhánh "if appended" thì các lần gọi sau (appended=0 vì đã
+        # tồn tại) sẽ không bao giờ sắp xếp lại được data cũ.
+        def _sort_key(ev):
+            ts = ev.get("event_time") or ev.get("created_at") or ""
+            return str(ts)
+        history.sort(key=_sort_key, reverse=True)
+
+        r2.put_object(
+            Bucket=BUCKET,
+            Key="alpha-events/history.json",
+            Body=json.dumps(history, default=str).encode("utf-8"),
+            ContentType="application/json"
+        )
         if appended:
-            # Sort lại toàn bộ history theo thời gian MỚI NHẤT lên đầu.
-            # Trước đây chỉ append vào cuối mảng — event mới realtime bị
-            # chôn ở cuối một mảng ~300 phần tử đã sort sẵn (từ backfill
-            # sync_listing_prices.py), khiến frontend tưởng "mất" event dù
-            # data vẫn có đủ, chỉ là nằm sai vị trí/trang cuối phân trang.
-            def _sort_key(ev):
-                ts = ev.get("event_time") or ev.get("created_at") or ""
-                return str(ts)
-            history.sort(key=_sort_key, reverse=True)
-            r2.put_object(
-                Bucket=BUCKET,
-                Key="alpha-events/history.json",
-                Body=json.dumps(history, default=str, ensure_ascii=False,
-                                separators=(',', ':')).encode('utf-8'),
-                ContentType='application/json',
-                CacheControl='max-age=60'
-            )
-            print(f"[storage] Auto-appended {appended} ended event(s) → history.json ✓")
+            print(f"[storage] Appended {appended} event(s) to history.json, re-sorted ✓")
+        else:
+            print(f"[storage] history.json re-sorted (no new events) ✓")
     except Exception as e:
         print(f"[storage] Append history error: {e}")
 
