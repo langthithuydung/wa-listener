@@ -358,6 +358,15 @@ def _append_ended_to_history(ended_events: list):
             appended += 1
 
         if appended:
+            # Sort lại toàn bộ history theo thời gian MỚI NHẤT lên đầu.
+            # Trước đây chỉ append vào cuối mảng — event mới realtime bị
+            # chôn ở cuối một mảng ~300 phần tử đã sort sẵn (từ backfill
+            # sync_listing_prices.py), khiến frontend tưởng "mất" event dù
+            # data vẫn có đủ, chỉ là nằm sai vị trí/trang cuối phân trang.
+            def _sort_key(ev):
+                ts = ev.get("event_time") or ev.get("created_at") or ""
+                return str(ts)
+            history.sort(key=_sort_key, reverse=True)
             r2.put_object(
                 Bucket=BUCKET,
                 Key="alpha-events/history.json",
