@@ -4,7 +4,7 @@ import re
 import time
 import urllib.request
 import urllib.error
-from datetime import datetime, timezone, date
+from datetime import datetime, timezone, date, timedelta
 
 MODEL_NAME = "gemini-3.1-flash-lite"  # 2.0-flash-lite đã bị khai tử 1/6/2026
 
@@ -100,6 +100,59 @@ def _parse_relative_event_time(text: str, msg_date=None) -> str | None:
         event_date.year, event_date.month, event_date.day,
         hour, minute, tzinfo=timezone.utc
     )
+    return event_dt.isoformat()
+
+
+_MONTH_NAMES = {
+    "january": 1, "february": 2, "march": 3, "april": 4, "may": 5, "june": 6,
+    "july": 7, "august": 8, "september": 9, "october": 10, "november": 11, "december": 12,
+}
+
+def _parse_absolute_event_time(text: str, msg_date=None) -> str | None:
+    """
+    Binance cũng hay ghi giờ kiểu TUYỆT ĐỐI ngay trong text (khác hẳn
+    dạng "today at..." ở hàm trên): "trading starting on July 27, 2026,
+    at 10:00 (UTC)", "debut and trading starting on January 30, 2026, at
+    12:00 (UTC)". Trước đây KHÔNG có hàm nào bắt được dạng này bằng regex
+    — chỉ trông chờ Gemini fallback, nên khi Gemini không trả (rate limit/
+    cooldown/lỗi) hoặc tự bỏ sót, event_time bị bỏ trống hoàn toàn dù text
+    ghi rõ ràng ngày giờ.
+
+    SAFETY CHECK quan trọng: nếu có msg_date (ngày đăng tin thật) và ngày
+    bắt được lại nằm QUÁ KHỨ xa so với lúc đăng (>2 ngày trước) — nhiều
+    khả năng Binance dùng nhầm template cũ/copy-paste sai tháng (case thật
+    đã gặp: tin đăng 29/07/2026 nhưng ghi "January 30, 2026" — rất có thể
+    lẽ ra phải là "July 30"). Trường hợp này KHÔNG dùng ngày bắt được, để
+    trống còn hơn để event bị hệ thống tự động đóng "ended" oan chỉ vì
+    tưởng nó đã quá hạn từ tháng 1.
+    """
+    m = re.search(
+        r'(January|February|March|April|May|June|July|August|September|October|November|December)\s+'
+        r'(\d{1,2}),?\s+(\d{4}),?\s+at\s+(\d{1,2}):(\d{2})\s*\(?\s*UTC\s*\)?',
+        text, re.IGNORECASE
+    )
+    if not m:
+        return None
+
+    month_name, day, year, hour, minute = m.groups()
+    month = _MONTH_NAMES.get(month_name.lower())
+    day, year, hour, minute = int(day), int(year), int(hour), int(minute)
+    if not month or not (1 <= day <= 31 and 0 <= hour <= 23 and 0 <= minute <= 59):
+        return None
+
+    try:
+        event_dt = datetime(year, month, day, hour, minute, tzinfo=timezone.utc)
+    except ValueError:
+        return None  # VD "February 30" — ngày không tồn tại
+
+    if msg_date:
+        posted = msg_date if hasattr(msg_date, "tzinfo") else None
+        if posted and event_dt < posted - timedelta(days=2):
+            print(f"[Parser] Sanity: ngày tuyệt đối {event_dt.isoformat()} nằm quá khứ xa so với "
+                  f"lúc đăng tin ({posted.isoformat()}) — nghi Binance dùng nhầm template/copy-paste "
+                  f"sai tháng, BỎ QUA để tránh event bị tự động đóng oan")
+            return None
+
     return event_dt.isoformat()
 
 
@@ -212,6 +265,12 @@ def parse_with_regex(text: str, msg_date=None) -> dict:
 
     # Giờ tương đối "today at HH:MM (UTC)" → ISO datetime tuyệt đối
     event_time = _parse_relative_event_time(text, msg_date)
+    if not event_time:
+        # [MỚI] Thử dạng ngày TUYỆT ĐỐI ghi thẳng trong text (VD "July 27,
+        # 2026, at 10:00 (UTC)") — trước đây chỉ Gemini xử lý được dạng
+        # này, giờ có thêm regex xử lý trực tiếp, không phụ thuộc Gemini
+        # (nhanh hơn, không tốn quota, và không bị rate-limit/cooldown).
+        event_time = _parse_absolute_event_time(text, msg_date)
     if event_time:
         result["event_time_utc"] = event_time
 
