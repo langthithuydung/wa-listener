@@ -366,8 +366,23 @@ def _upsert_ended_to_all_events(ended_events: list):
                 # ATH — nếu không, entry cũ thiếu contract sẽ bị bỏ qua
                 # (dòng "and e.get('contract_address')" trong enrich_events)
                 # vĩnh viễn, không bao giờ tự retry được.
-                if not existing.get("contract_address") and e.get("contract_address"):
-                    existing["contract_address"] = e["contract_address"]
+                #
+                # [SỬA — BUG] Điều kiện cũ "not existing.get('contract_address')"
+                # CHỈ điền khi đang TRỐNG — nếu contract cũ đã bị lưu SAI (ví dụ
+                # enrich_token() lỡ khớp nhầm token trùng ticker lúc mới lên
+                # "live"), thì dù Supabase đã được sửa đúng lại, điều kiện này
+                # vẫn luôn False → không bao giờ ghi đè được nữa (case AEON đã
+                # xảy ra thật). Giờ so sánh khác nhau thì ghi đè, không chỉ khi
+                # trống — đồng thời reset listing_price/các cờ *_checked về
+                # None để sync_listing_prices.py BẮT BUỘC tính lại VWAP theo
+                # đúng contract mới, tránh giữ lại giá trị "đang đồng bộ..."
+                # tính sai theo contract cũ.
+                new_contract = e.get("contract_address")
+                if new_contract and new_contract != existing.get("contract_address"):
+                    existing["contract_address"] = new_contract
+                    existing["listing_price"] = None
+                    for flag in ("_vwap_daybound_checked", "_tge_date_checked", "_multiround_checked"):
+                        existing.pop(flag, None)
                     updated += 1
                 continue
 
@@ -414,11 +429,33 @@ def _append_ended_to_history(ended_events: list):
             h.get("source_msg_id") for h in history
             if h.get("source_msg_id") is not None
         }
+        # [MỚI] Index theo source_msg_id để có thể SỬA lại entry đã tồn tại
+        # (trước đây chỉ có set id để check trùng, không tra ngược lại được
+        # object nên không thể cập nhật contract_address khi Supabase sửa).
+        existing_by_msg_id = {
+            h.get("source_msg_id"): h for h in history
+            if h.get("source_msg_id") is not None
+        }
 
         appended = 0
+        updated = 0
         for e in ended_events:
             msg_id = e.get("source_msg_id")
             if msg_id is not None and msg_id in existing_msg_ids:
+                # [SỬA — BUG] Trước đây chỉ continue, không bao giờ cập nhật
+                # entry đã có sẵn trong history.json — nên khi contract_address
+                # bị lưu sai lúc đầu rồi được sửa lại đúng trên Supabase, bản
+                # trên R2 vẫn trơ trơ giá trị sai mãi mãi (case AEON). Giờ nếu
+                # contract khác với bản đang lưu thì ghi đè, đồng thời reset
+                # listing_price để sync_listing_prices.py tính lại VWAP đúng.
+                existing_entry = existing_by_msg_id.get(msg_id)
+                new_contract = e.get("contract_address")
+                if existing_entry and new_contract and new_contract != existing_entry.get("contract_address"):
+                    existing_entry["contract_address"] = new_contract
+                    existing_entry["listing_price"] = None
+                    for flag in ("_vwap_daybound_checked", "_tge_date_checked", "_multiround_checked"):
+                        existing_entry.pop(flag, None)
+                    updated += 1
                 continue  # đã có trong history rồi
             history.append(e)
             if msg_id is not None:
@@ -442,10 +479,10 @@ def _append_ended_to_history(ended_events: list):
             Body=json.dumps(history, default=str).encode("utf-8"),
             ContentType="application/json"
         )
-        if appended:
-            print(f"[storage] Appended {appended} event(s) to history.json, re-sorted ✓")
+        if appended or updated:
+            print(f"[storage] history.json: {appended} appended, {updated} contract_address corrected, re-sorted ✓")
         else:
-            print(f"[storage] history.json re-sorted (no new events) ✓")
+            print(f"[storage] history.json re-sorted (no new/updated events) ✓")
     except Exception as e:
         print(f"[storage] Append history error: {e}")
 

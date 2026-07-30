@@ -109,11 +109,24 @@ def job_enrich_prices():
     """
     try:
         supabase = _get_supabase()
+
+        # [SỬA — BUG] Trước đây chỉ lấy status upcoming/live/pending — một
+        # khi event chuyển "ended" (2h sau event_time, xem job_auto_expire),
+        # nó biến mất khỏi query này VĨNH VIỄN, dù contract_address bị sai
+        # (case AEON đã xảy ra thật). Giờ thêm "ended" nhưng giới hạn trong
+        # 14 ngày gần nhất — đủ thời gian để enrich lại/tự sửa, mà không làm
+        # job quét lại API vô hạn với hàng nghìn event ended cũ về sau.
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=14)).isoformat()
         rows = supabase.table("alpha_events") \
-            .select("id, symbol, project_name, amount_per_user, contract_address, price_snapshot, tokens_detail, status") \
-            .in_("status", ["upcoming", "live", "pending"]) \
+            .select("id, symbol, project_name, amount_per_user, contract_address, price_snapshot, tokens_detail, status, event_time, created_at") \
+            .in_("status", ["upcoming", "live", "pending", "ended"]) \
             .not_.is_("symbol", "null") \
             .execute().data
+        rows = [
+            r for r in rows
+            if r.get("status") != "ended"
+            or (r.get("event_time") or r.get("created_at") or "") >= cutoff
+        ]
 
         if not rows:
             return
@@ -138,7 +151,14 @@ def job_enrich_prices():
                 amount  = row.get("amount_per_user")
                 val_usd = compute_value_usd(amount, price)
 
-                if enriched.get("contract_address") and not row.get("contract_address"):
+                # [SỬA — BUG] Điều kiện cũ "not row.get('contract_address')"
+                # CHỈ điền khi đang TRỐNG — nếu contract cũ đã bị enrich sai
+                # (ticker collision lúc mới "live"), nó sẽ bị kẹt sai vĩnh
+                # viễn vì điều kiện này luôn False sau đó. Giờ so sánh khác
+                # nhau thì ghi đè. Nguồn enrich_token() đã tự bảo vệ khỏi
+                # collision (allow_dex_fallback=False khi upcoming/pending),
+                # nên tin tưởng ghi đè an toàn ở đây.
+                if enriched.get("contract_address") and enriched["contract_address"] != row.get("contract_address"):
                     update_data["contract_address"] = enriched["contract_address"]
                 if enriched.get("price_snapshot"):
                     update_data["price_snapshot"] = enriched["price_snapshot"]
