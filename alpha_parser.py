@@ -34,11 +34,36 @@ def is_relevant(text: str) -> bool:
     return False
 
 
+# Tin "follow-up campaign" — VD "GRVT Deposit Campaign": hướng dẫn user
+# ĐÃ NHẬN airdrop rồi đi deposit/transfer token vào ví/Alpha Account để
+# nhận thêm thưởng phụ. Đây KHÔNG PHẢI sự kiện claim airdrop mới — không
+# có ngưỡng Alpha Points thật, symbol dễ bị nhận nhầm (VD "(MPC)" — viết
+# tắt loại ví bị hiểu lầm thành symbol). Case thật: msg 1608 (GRVT gốc)
+# tự báo trước "We also have a GRVT Deposit Campaign coming up!", rồi
+# msg 1609 chính là tin follow-up đó — bị parse thành 1 event RÁC riêng
+# với symbol="MPC" sai hoàn toàn, points_threshold=300 lấy nhầm từ số
+# lượng token cần deposit (không phải Alpha Points).
+FOLLOWUP_CAMPAIGN_SIGNALS = [
+    "deposit campaign",
+    "who received their airdrop",
+    "received your airdrop",
+    "received their airdrop",
+]
+
+def is_followup_campaign(text: str) -> bool:
+    text_lower = text.lower()
+    return any(sig in text_lower for sig in FOLLOWUP_CAMPAIGN_SIGNALS)
+
+
 SYMBOL_BLACKLIST = {
     "UTC", "TGE", "AM", "PM", "GMT", "USD", "USDT", "USDC", "BNB",
     "CEO", "API", "URL", "FAQ", "TBA", "TBD", "ID", "VIP", "KYC",
     "AML", "DEX", "CEX", "NFT", "DAO", "P2P", "OTC", "BSC", "ETH",
     "SOL", "ARB", "BASE", "EVM",
+    "MPC",  # "Binance Wallet (MPC)" — viết tắt loại ví (Multi-Party
+            # Computation), KHÔNG phải symbol token. Case thật đã gặp:
+            # tin "GRVT Deposit Campaign" nhắc "Binance Wallet(MPC)" bị
+            # nhận nhầm MPC thành symbol, ghi đè lên GRVT.
 }
 
 
@@ -349,6 +374,10 @@ def parse_message(text: str, msg_date=None) -> dict | None:
     các tin dạng "today at..." (an toàn hơn là đoán sai).
     """
     if not is_relevant(text):
+        return None
+
+    if is_followup_campaign(text):
+        print("[Parser] Bỏ qua: tin follow-up (Deposit/Transfer Campaign) của token ĐÃ airdrop rồi, không phải sự kiện claim mới")
         return None
 
     result = parse_with_regex(text, msg_date=msg_date)

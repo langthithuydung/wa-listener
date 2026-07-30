@@ -110,7 +110,7 @@ def job_enrich_prices():
     try:
         supabase = _get_supabase()
         rows = supabase.table("alpha_events") \
-            .select("id, symbol, project_name, amount_per_user, contract_address, price_snapshot, tokens_detail") \
+            .select("id, symbol, project_name, amount_per_user, contract_address, price_snapshot, tokens_detail, status") \
             .in_("status", ["upcoming", "live", "pending"]) \
             .not_.is_("symbol", "null") \
             .execute().data
@@ -124,7 +124,12 @@ def job_enrich_prices():
             if not symbol:
                 continue
 
-            enriched = enrich_token(symbol, row.get("project_name"))
+            # [MỚI] Chỉ cho phép fallback GeckoTerminal/DexScreener khi
+            # token đã "live" (Binance chính thức xác nhận) — tránh lấy
+            # nhầm contract của token khác trùng ticker khi còn upcoming/
+            # pending (case thật đã xảy ra: GRVT bị lấy nhầm contract).
+            allow_dex = row.get("status") not in ("upcoming", "pending")
+            enriched = enrich_token(symbol, row.get("project_name"), allow_dex_fallback=allow_dex)
 
             update_data = {}
             val_usd = None
@@ -159,7 +164,7 @@ def job_enrich_prices():
                     if not t_symbol:
                         new_tokens_detail.append(t)
                         continue
-                    t_enriched = enrich_token(t_symbol, None)
+                    t_enriched = enrich_token(t_symbol, None, allow_dex_fallback=allow_dex)
                     time.sleep(0.4)  # tránh rate limit khi enrich nhiều token liên tiếp
                     t_updated = dict(t)  # copy, giữ nguyên tier_common/tier_rare/tier_super_rare
                     if t_enriched:

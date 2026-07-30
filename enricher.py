@@ -167,23 +167,115 @@ def _from_dexscreener(symbol: str, project_name: str = None) -> dict:
         return {}
 
 
-def enrich_token(symbol: str, project_name: str = None) -> dict:
+def _from_binance_web3_search(symbol: str, project_name: str = None) -> dict:
+    """
+    [MỚI] Tìm qua chính API của web3.binance.com (Binance Wallet token
+    search) — CÙNG NGUỒN DỮ LIỆU với trang mà người dùng tự search thủ
+    công để tìm contract đúng (web3.binance.com/en/token/...). Đáng tin
+    hơn hẳn GeckoTerminal/DexScreener vì đây là data GỐC của Binance, có
+    gắn tag "Alpha" trong tagsInfo cho token đã/đang lên Alpha — không
+    phải suy đoán qua DEX aggregator bên thứ 3.
+
+    Vẫn phải cẩn thận ticker collision: keyword search có thể trả về
+    NHIỀU token trùng symbol trên các chain khác nhau → lọc ưu tiên:
+    1. symbol khớp CHÍNH XÁC (không phân biệt hoa/thường)
+    2. Có tag "Alpha" trong tagsInfo (dấu hiệu mạnh đây đúng là token Alpha)
+    3. Nếu vẫn nhiều kết quả — chọn thanh khoản (liquidity) cao nhất
+    """
+    query = symbol  # search theo symbol chính xác, KHÔNG dùng project_name
+                     # (tên dự án dài dễ ra kết quả tìm kiếm mờ/không liên quan)
+    try:
+        r = SESSION.get(
+            "https://web3.binance.com/bapi/defi/v5/public/wallet-direct/buw/wallet/market/token/search/ai",
+            params={"keyword": query, "chainIds": "56,1,8453,501,42161,784,146", "orderBy": "volume24h"},
+            timeout=10
+        )
+        r.raise_for_status()
+        candidates = r.json().get("data", [])
+        if not candidates:
+            return {}
+
+        # Bước 1: chỉ giữ những candidate symbol khớp CHÍNH XÁC
+        exact = [c for c in candidates if (c.get("symbol") or "").upper() == symbol.upper()]
+        pool = exact if exact else candidates
+
+        # Bước 2: ưu tiên candidate có tag "Alpha" (Binance tự đánh dấu)
+        def _has_alpha_tag(c):
+            tags = c.get("tagsInfo") or {}
+            recog = tags.get("Community Recognition Level") or []
+            return any((t.get("tagName") or "").lower() == "alpha" for t in recog)
+
+        alpha_tagged = [c for c in pool if _has_alpha_tag(c)]
+        pool = alpha_tagged if alpha_tagged else pool
+
+        if not pool:
+            return {}
+
+        # Bước 3: thanh khoản cao nhất trong số còn lại
+        best = sorted(pool, key=lambda c: float(c.get("liquidity") or 0), reverse=True)[0]
+
+        chain_id = str(best.get("chainId") or "56")
+        return {
+            "contract_address": best.get("contractAddress"),
+            "price_snapshot":   float(best.get("price") or 0) or None,
+            "market_cap":       float(best.get("marketCap") or 0) or None,
+            "fdv":              None,
+            "chain_id":         chain_id,
+            "chain_name":       CHAIN_NAMES.get(chain_id, chain_id),
+            "source":           "binance_web3_search",
+        }
+    except Exception as e:
+        print(f"[enricher] Binance Web3 search error: {e}")
+        return {}
+
+
+def enrich_token(symbol: str, project_name: str = None, allow_dex_fallback: bool = True) -> dict:
     """
     Main function: tìm contract + giá cho token.
     Trả về dict với các field để update Supabase.
+
+    allow_dex_fallback: [MỚI] Khi False, CHỈ tin nguồn Binance Alpha official
+    (bước 1) — không rơi xuống GeckoTerminal/DexScreener (bước 2/3).
+
+    LÝ DO: GeckoTerminal/DexScreener search theo symbol/tên rất dễ bị
+    "ticker collision" — nhiều token không liên quan nhau vẫn đặt trùng
+    ký hiệu ngắn (VD "GRVT") trên các chain khác nhau. Khi event còn ở
+    trạng thái upcoming/pending (Binance CHƯA chính thức đưa token vào
+    Alpha token list), bước 1 sẽ luôn thất bại → dễ rơi xuống bước 2/3 và
+    lấy NHẦM contract của 1 token trùng ticker hoàn toàn khác (đã xảy ra
+    thật với GRVT: lấy nhầm contract 0xce152b73... trong khi contract
+    đúng là 0x46F2564E...). Chỉ nên cho phép fallback DEX sau khi event
+    đã "live" — lúc đó Binance official list gần như chắc chắn đã có
+    token thật, giảm mạnh rủi ro trùng ticker.
     """
     if not symbol:
         return {}
 
     print(f"[enricher] Enriching {symbol}...")
 
-    # 1. Binance Alpha API (chính xác nhất)
+    # 1. Binance Alpha API (chính xác nhất — token đã chính thức lên Alpha)
     result = _from_binance_alpha(symbol)
     if result.get("contract_address") and result.get("price_snapshot"):
         print(f"[enricher] {symbol} ✓ from Binance Alpha: ${result['price_snapshot']:.6f}")
         return result
 
-    # 2. GeckoTerminal
+    # 2. [MỚI] Binance Web3 token search — vẫn là data GỐC Binance (không
+    # phải suy đoán qua DEX bên thứ 3), nên vẫn cho phép dùng ngay cả khi
+    # event còn "upcoming" (khác với GeckoTerminal/DexScreener ở bước 3/4
+    # bị chặn lúc upcoming để tránh ticker collision).
+    result_web3 = _from_binance_web3_search(symbol, project_name)
+    if result_web3.get("contract_address"):
+        if result.get("price_snapshot") and not result_web3.get("price_snapshot"):
+            result_web3["price_snapshot"] = result["price_snapshot"]
+        print(f"[enricher] {symbol} ✓ from Binance Web3 search: ${result_web3.get('price_snapshot','?')}")
+        return result_web3
+
+    if not allow_dex_fallback:
+        if result:
+            print(f"[enricher] {symbol} - upcoming, chưa có trong Binance Alpha list lẫn Web3 search → BỎ QUA DEX fallback (tránh trùng ticker), giữ contract=None")
+        return result  # trả về những gì Binance Alpha có (có thể rỗng), KHÔNG đoán qua DEX bên thứ 3
+
+    # 3. GeckoTerminal
     result2 = _from_geckoterminal(symbol, project_name)
     if result2.get("contract_address"):
         # Nếu Binance Alpha có giá nhưng không có contract → merge
@@ -192,7 +284,7 @@ def enrich_token(symbol: str, project_name: str = None) -> dict:
         print(f"[enricher] {symbol} ✓ from GeckoTerminal: ${result2.get('price_snapshot','?')}")
         return result2
 
-    # 3. DexScreener
+    # 4. DexScreener
     result3 = _from_dexscreener(symbol, project_name)
     if result3.get("contract_address"):
         print(f"[enricher] {symbol} ✓ from DexScreener: ${result3.get('price_snapshot','?')}")
