@@ -359,30 +359,30 @@ def _upsert_ended_to_all_events(ended_events: list):
             existing = existing_by_msg_id.get(msg_id) if msg_id is not None else None
 
             if existing is not None:
-                # Đã có sẵn — nhưng nếu lần trước thiếu contract_address
-                # (job enrich_token lúc đó chưa tìm ra), mà giờ Supabase đã
-                # có giá trị mới (VD tự sửa tay/enrich lại), thì cập nhật
-                # lại để sync_listing_prices.py có cơ hội enrich giá VWAP/
-                # ATH — nếu không, entry cũ thiếu contract sẽ bị bỏ qua
-                # (dòng "and e.get('contract_address')" trong enrich_events)
-                # vĩnh viễn, không bao giờ tự retry được.
-                #
-                # [SỬA — BUG] Điều kiện cũ "not existing.get('contract_address')"
-                # CHỈ điền khi đang TRỐNG — nếu contract cũ đã bị lưu SAI (ví dụ
-                # enrich_token() lỡ khớp nhầm token trùng ticker lúc mới lên
-                # "live"), thì dù Supabase đã được sửa đúng lại, điều kiện này
-                # vẫn luôn False → không bao giờ ghi đè được nữa (case AEON đã
-                # xảy ra thật). Giờ so sánh khác nhau thì ghi đè, không chỉ khi
-                # trống — đồng thời reset listing_price/các cờ *_checked về
-                # None để sync_listing_prices.py BẮT BUỘC tính lại VWAP theo
-                # đúng contract mới, tránh giữ lại giá trị "đang đồng bộ..."
-                # tính sai theo contract cũ.
-                new_contract = e.get("contract_address")
-                if new_contract and new_contract != existing.get("contract_address"):
-                    existing["contract_address"] = new_contract
+                # [SỬA — TỔNG QUÁT HOÁ] Trước đây chỉ so sánh/ghi đè riêng
+                # contract_address — nhưng CÙNG một kiểu bug (Supabase sửa
+                # đúng rồi, R2 vẫn giữ giá trị cũ mãi mãi) cũng xảy ra với
+                # amount_per_user/value_usd (case Alpha Box ON: bị lưu tier
+                # Super Rare 1125 thay vì tier Common 315 do bug parser cũ,
+                # backfill lại Supabase xong mà R2 không tự nhận). Giờ so
+                # sánh một danh sách field "có thể tự sửa tay/backfill",
+                # ghi đè bất cứ field nào khác với bản trên R2.
+                changed_fields = []
+                for field in ("contract_address", "amount_per_user", "value_usd",
+                              "price_snapshot", "market_cap", "fdv", "tokens_detail"):
+                    new_val = e.get(field)
+                    if new_val is not None and new_val != existing.get(field):
+                        existing[field] = new_val
+                        changed_fields.append(field)
+
+                # contract_address đổi → giá VWAP cũ tính theo contract SAI,
+                # phải reset để sync_listing_prices.py bắt buộc tính lại.
+                if "contract_address" in changed_fields:
                     existing["listing_price"] = None
                     for flag in ("_vwap_daybound_checked", "_tge_date_checked", "_multiround_checked"):
                         existing.pop(flag, None)
+
+                if changed_fields:
                     updated += 1
                 continue
 
@@ -396,7 +396,7 @@ def _upsert_ended_to_all_events(ended_events: list):
                 Body=json.dumps(all_events, default=str).encode("utf-8"),
                 ContentType="application/json"
             )
-            print(f"[storage] all.json: {upserted} event(s) mới, {updated} event(s) cập nhật contract_address (chờ sync_listing_prices.py enrich giá) ✓")
+            print(f"[storage] all.json: {upserted} event(s) mới, {updated} event(s) đồng bộ lại field đã sửa trên Supabase ✓")
     except Exception as e:
         print(f"[storage] Upsert all.json error: {e}")
 
@@ -442,20 +442,29 @@ def _append_ended_to_history(ended_events: list):
         for e in ended_events:
             msg_id = e.get("source_msg_id")
             if msg_id is not None and msg_id in existing_msg_ids:
-                # [SỬA — BUG] Trước đây chỉ continue, không bao giờ cập nhật
-                # entry đã có sẵn trong history.json — nên khi contract_address
-                # bị lưu sai lúc đầu rồi được sửa lại đúng trên Supabase, bản
-                # trên R2 vẫn trơ trơ giá trị sai mãi mãi (case AEON). Giờ nếu
-                # contract khác với bản đang lưu thì ghi đè, đồng thời reset
-                # listing_price để sync_listing_prices.py tính lại VWAP đúng.
+                # [SỬA — TỔNG QUÁT HOÁ] Cùng logic với _upsert_ended_to_all_events:
+                # so sánh 1 danh sách field "có thể tự sửa tay/backfill" trên
+                # Supabase, ghi đè vào entry đã có sẵn trong history.json nếu
+                # khác — bao trùm cả case contract_address (AEON) lẫn
+                # amount_per_user/value_usd (case Alpha Box tier — ON bị lưu
+                # nhầm tier Super Rare 1125 thay vì tier Common 315).
                 existing_entry = existing_by_msg_id.get(msg_id)
-                new_contract = e.get("contract_address")
-                if existing_entry and new_contract and new_contract != existing_entry.get("contract_address"):
-                    existing_entry["contract_address"] = new_contract
-                    existing_entry["listing_price"] = None
-                    for flag in ("_vwap_daybound_checked", "_tge_date_checked", "_multiround_checked"):
-                        existing_entry.pop(flag, None)
-                    updated += 1
+                if existing_entry:
+                    changed_fields = []
+                    for field in ("contract_address", "amount_per_user", "value_usd",
+                                  "price_snapshot", "market_cap", "fdv", "tokens_detail"):
+                        new_val = e.get(field)
+                        if new_val is not None and new_val != existing_entry.get(field):
+                            existing_entry[field] = new_val
+                            changed_fields.append(field)
+
+                    if "contract_address" in changed_fields:
+                        existing_entry["listing_price"] = None
+                        for flag in ("_vwap_daybound_checked", "_tge_date_checked", "_multiround_checked"):
+                            existing_entry.pop(flag, None)
+
+                    if changed_fields:
+                        updated += 1
                 continue  # đã có trong history rồi
             history.append(e)
             if msg_id is not None:
@@ -480,7 +489,7 @@ def _append_ended_to_history(ended_events: list):
             ContentType="application/json"
         )
         if appended or updated:
-            print(f"[storage] history.json: {appended} appended, {updated} contract_address corrected, re-sorted ✓")
+            print(f"[storage] history.json: {appended} appended, {updated} event(s) đồng bộ lại field đã sửa trên Supabase, re-sorted ✓")
         else:
             print(f"[storage] history.json re-sorted (no new/updated events) ✓")
     except Exception as e:
