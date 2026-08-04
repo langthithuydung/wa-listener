@@ -410,14 +410,28 @@ def enrich_token(symbol: str, project_name: str = None, allow_dex_fallback: bool
     """
     result = _enrich_token_auto(symbol, project_name, allow_dex_fallback)
 
-    override = _get_manual_overrides().get((symbol or "").upper())
-    if override:
-        result = dict(result) if result else {}
-        result["contract_address"] = override["contract_address"]
-        result["chain_id"]   = override.get("chain_id") or result.get("chain_id")
-        result["chain_name"] = override.get("chain_name") or result.get("chain_name")
-        result["source"] = (result.get("source") or "") + "+manual_override"
-        print(f"[enricher] {symbol} ✓ contract từ contract_overrides (Supabase): {override['contract_address']}")
+    # [QUAN TRỌNG] Chỉ áp override khi Binance Alpha CHƯA niêm yết chính
+    # thức (source khác "binance_alpha", hoặc thiếu contract). Một khi
+    # token đã lên chính thức trên Binance Alpha token list (đủ cả
+    # contract + giá — đây là nguồn tin cậy tuyệt đối), TỰ ĐỘNG bỏ qua
+    # override và dùng thẳng data thật — không cần vào Supabase xoá tay
+    # dòng override. Nhờ vậy quy trình là: auto chạy bình thường → sai
+    # thì tự tra rồi SQL đè tạm → lúc Binance niêm yết chính thức, job
+    # 5 phút tự nhận ra và tự chuyển sang tin data official, khỏi cần
+    # dọn dẹp gì thêm.
+    is_official = result.get("source") == "binance_alpha" and result.get("contract_address")
+
+    if not is_official:
+        override = _get_manual_overrides().get((symbol or "").upper())
+        if override:
+            result = dict(result) if result else {}
+            result["contract_address"] = override["contract_address"]
+            result["chain_id"]   = override.get("chain_id") or result.get("chain_id")
+            result["chain_name"] = override.get("chain_name") or result.get("chain_name")
+            result["source"] = (result.get("source") or "") + "+manual_override"
+            print(f"[enricher] {symbol} ✓ contract từ contract_overrides (Supabase, tạm — chưa niêm yết chính thức): {override['contract_address']}")
+    else:
+        print(f"[enricher] {symbol} ✓ đã niêm yết chính thức trên Binance Alpha — bỏ qua override, dùng data official")
 
     return result
 
