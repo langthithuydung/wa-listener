@@ -436,6 +436,58 @@ def enrich_token(symbol: str, project_name: str = None, allow_dex_fallback: bool
     return result
 
 
+# ── Verify contract thủ công (dùng cho endpoint /admin/set-contract) ──
+def verify_contract_on_binance_web3(symbol: str, contract_address: str) -> dict:
+    """
+    Xác nhận 1 địa chỉ contract có THẬT trên hệ thống của Binance hay
+    không — gọi CHÍNH XÁC API mà trang web3.binance.com dùng khi bạn tự
+    paste địa chỉ vào ô search, nhưng search theo ĐỊA CHỈ thay vì theo
+    symbol/keyword (search theo symbol dễ bị ticker collision như đã gặp
+    với GRVT; search theo address thì chỉ có 1 kết quả đúng duy nhất
+    hoặc không có gì — không thể nhầm).
+
+    Trả về {} nếu Binance không nhận ra địa chỉ này (an toàn — không nên
+    tin tưởng, có thể do sai địa chỉ hoặc token đó Binance chưa từng
+    thấy giao dịch nào). Trả về dict thông tin nếu khớp CHÍNH XÁC.
+    """
+    if not contract_address:
+        return {}
+    try:
+        r = SESSION.get(
+            "https://web3.binance.com/bapi/defi/v5/public/wallet-direct/buw/wallet/market/token/search/ai",
+            params={"keyword": contract_address, "chainIds": "56,1,8453,501,42161,784,146"},
+            timeout=10
+        )
+        r.raise_for_status()
+        candidates = r.json().get("data", [])
+    except Exception as e:
+        print(f"[enricher] verify_contract_on_binance_web3 error: {e}")
+        return {}
+
+    for c in candidates:
+        addr = (c.get("contractAddress") or "").lower()
+        if addr and addr == contract_address.lower():
+            chain_id = str(c.get("chainId") or "")
+            price = c.get("price")
+            return {
+                "found": True,
+                "contract_address": c.get("contractAddress"),
+                "symbol_on_binance": (c.get("symbol") or "").upper(),
+                "name_on_binance": c.get("name"),
+                "chain_id": chain_id,
+                "chain_name": CHAIN_NAMES.get(chain_id, chain_id),
+                "price": float(price) if price else None,
+            }
+    return {}
+
+
+def _invalidate_override_cache():
+    """Gọi ngay sau khi vừa ghi 1 dòng mới vào contract_overrides, để lần
+    enrich_token() tiếp theo đọc bảng MỚI thay vì cache cũ (tối đa 60s)."""
+    global _override_cache_ts
+    _override_cache_ts = 0
+
+
 def compute_value_usd(amount_per_user, price_snapshot) -> float | None:
     """Tính tổng giá trị airdrop per user."""
     if amount_per_user and price_snapshot:

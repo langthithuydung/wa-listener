@@ -260,6 +260,87 @@ def run_blindbox():
 
 
 # ── Test endpoint ─────────────────────────────────────
+@app.get("/admin/set-contract")
+def admin_set_contract(symbol: str, contract: str):
+    """
+    Endpoint DUY NHẤT dùng khi Grok/nguồn ngoài tìm ra contract cho token
+    chưa niêm yết chính thức trên Binance Alpha (pre-TGE). Thay cho việc
+    tự mở web3.binance.com kiểm tra tay + viết SQL insert + tự gọi
+    /run/enrich — giờ chỉ cần 1 request:
+
+        GET /admin/set-contract?symbol=QUID&contract=0x1a44233FAe8D50F1AeB3a5d58dd426ff4814Cb53
+
+    Tự động, theo đúng thứ tự:
+      1. VERIFY địa chỉ qua chính API web3.binance.com (search theo địa
+         chỉ — cùng cách bạn tự paste tay). Nếu Binance không nhận ra
+         địa chỉ này → TỪ CHỐI, không ghi gì cả (chặn contract giả/sai).
+      2. Nếu symbol Binance trả về khác symbol bạn nhập → TỪ CHỐI (tránh
+         set nhầm contract của 1 token trùng ticker khác).
+      3. Lưu vào bảng contract_overrides (Supabase) — job tự động sau
+         này sẽ tự nhường lại cho data chính thức khi Binance Alpha
+         niêm yết thật (xem enrich_token() trong enricher.py).
+      4. Enrich lại NGAY những event đang có symbol này + refresh R2 —
+         thấy kết quả ngay, không cần đợi.
+    """
+    symbol = (symbol or "").strip().upper()
+    contract = (contract or "").strip()
+
+    if not symbol or not contract:
+        return {"success": False, "error": "Thiếu symbol hoặc contract"}
+
+    from enricher import verify_contract_on_binance_web3, _invalidate_override_cache
+
+    verify = verify_contract_on_binance_web3(symbol, contract)
+    if not verify:
+        return {
+            "success": False,
+            "error": f"Binance web3 KHÔNG nhận ra địa chỉ {contract}. Không ghi gì cả. "
+                     f"Kiểm tra lại: sai địa chỉ, sai chain, hoặc token chưa từng có "
+                     f"giao dịch nào mà Binance theo dõi được."
+        }
+
+    on_chain_symbol = verify.get("symbol_on_binance")
+    if on_chain_symbol and on_chain_symbol != symbol:
+        return {
+            "success": False,
+            "error": f"Binance nhận ra địa chỉ này nhưng symbol trên chain là "
+                     f"'{on_chain_symbol}', khác '{symbol}' bạn nhập — dừng lại để "
+                     f"tránh set nhầm contract của token khác. Kiểm tra lại trước khi thử lại.",
+            "found_on_binance": verify,
+        }
+
+    try:
+        from scheduler import _get_supabase
+        supabase = _get_supabase()
+        supabase.table("contract_overrides").upsert({
+            "symbol": symbol,
+            "contract_address": verify["contract_address"],
+            "chain_id": verify.get("chain_id"),
+            "chain_name": verify.get("chain_name"),
+            "note": f"Verified qua web3.binance.com search-by-address ({time.strftime('%Y-%m-%d %H:%M UTC', time.gmtime())})",
+        }, on_conflict="symbol").execute()
+    except Exception as e:
+        return {"success": False, "error": f"Verify OK nhưng lỗi ghi Supabase: {e}"}
+
+    _invalidate_override_cache()
+
+    try:
+        from scheduler import enrich_symbol_now
+        updated = enrich_symbol_now(symbol)
+    except Exception as e:
+        return {
+            "success": True,
+            "warning": f"Đã lưu contract nhưng enrich ngay bị lỗi: {e} — job 5 phút tới sẽ tự chạy lại.",
+            "verified_on_binance": verify,
+        }
+
+    return {
+        "success": True,
+        "message": f"✓ Verified + đã lưu contract cho {symbol}, đã enrich lại {updated} event ngay lập tức.",
+        "verified_on_binance": verify,
+    }
+
+
 @app.get("/test")
 def test():
     text = """

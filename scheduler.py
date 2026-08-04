@@ -292,6 +292,59 @@ def job_auto_expire():
         print(f"[expire] Error: {e}")
 
 
+# ── Enrich nhanh 1 symbol (dùng cho /admin/set-contract) ─────────────
+def enrich_symbol_now(symbol: str) -> int:
+    """
+    [MỚI] Enrich lại NGAY LẬP TỨC chỉ những event có đúng symbol này —
+    KHÔNG chạy job_enrich_prices() đầy đủ (job đó loop hết cả bảng, có
+    sleep giữa mỗi dòng, có thể mất vài phút → treo lâu nếu gọi trực
+    tiếp từ 1 HTTP request). Dùng ngay sau khi vừa set contract override
+    thủ công, để thấy kết quả cập nhật tức thì thay vì đợi tối đa 5 phút.
+
+    Trả về số event đã cập nhật.
+    """
+    supabase = _get_supabase()
+    rows = supabase.table("alpha_events") \
+        .select("id, symbol, project_name, amount_per_user") \
+        .eq("symbol", symbol) \
+        .execute().data
+
+    if not rows:
+        return 0
+
+    updated = 0
+    for row in rows:
+        enriched = enrich_token(row["symbol"], row.get("project_name"), allow_dex_fallback=True)
+        if not enriched:
+            continue
+        update_data = {}
+        if enriched.get("contract_address"):
+            update_data["contract_address"] = enriched["contract_address"]
+        if enriched.get("price_snapshot"):
+            update_data["price_snapshot"] = enriched["price_snapshot"]
+            val = compute_value_usd(row.get("amount_per_user"), enriched["price_snapshot"])
+            if val:
+                update_data["value_usd"] = val
+        if enriched.get("market_cap"):
+            update_data["market_cap"] = enriched["market_cap"]
+        if enriched.get("fdv"):
+            update_data["fdv"] = enriched["fdv"]
+        if enriched.get("chain_id"):
+            update_data["chain_id"] = enriched["chain_id"]
+        if enriched.get("chain_name"):
+            update_data["chain_name"] = enriched["chain_name"]
+
+        if update_data:
+            supabase.table("alpha_events").update(update_data).eq("id", row["id"]).execute()
+            updated += 1
+
+    if updated:
+        from storage import refresh_r2_snapshot
+        refresh_r2_snapshot()
+
+    return updated
+
+
 # ── Khởi động scheduler ───────────────────────────────────────────────
 def start_scheduler():
     scheduler = BackgroundScheduler(timezone="UTC")
