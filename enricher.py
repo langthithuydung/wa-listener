@@ -398,15 +398,115 @@ def _get_manual_overrides() -> dict:
     return _override_cache
 
 
+# [MỚI] Reverse map của CHAIN_SLUG_MAP — chain_id số → network slug mà
+# GeckoTerminal dùng trong URL (VD: /networks/base/tokens/0x...).
+CHAIN_ID_TO_GECKO_NETWORK = {
+    "1": "eth", "56": "bsc", "8453": "base",
+    "501": "solana", "42161": "arbitrum", "146": "sonic",
+}
+
+
+def _from_dexscreener_by_address(contract_address: str, chain_id: str = None) -> dict:
+    """
+    Lấy giá/market cap/fdv TRỰC TIẾP theo địa chỉ contract — không qua
+    symbol/keyword nữa. Địa chỉ là duy nhất trên mỗi chain nên KHÔNG THỂ
+    dính ticker collision, khác hẳn _from_dexscreener() (tìm theo tên).
+    Dùng khi đã biết chắc contract đúng (từ contract_overrides) — vì
+    ngay cả khi contract đúng, bước TÌM GIÁ theo symbol vẫn có thể tình
+    cờ khớp nhầm 1 pool "trùng ticker" khác trên chain khác (case đã xảy
+    ra thật: QUID bị lấy nhầm market cap ~3 nghìn tỷ đô của 1 token QUID
+    khác không liên quan).
+    """
+    if not contract_address:
+        return {}
+    try:
+        r = SESSION.get(
+            f"https://api.dexscreener.com/latest/dex/tokens/{contract_address}",
+            timeout=10
+        )
+        r.raise_for_status()
+        pairs = r.json().get("pairs") or []
+        if not pairs:
+            return {}
+
+        # Nếu biết chain_id, lọc đúng chain (phòng hi hữu 1 địa chỉ hex
+        # trùng ngẫu nhiên trên chain khác — gần như không thể nhưng lọc
+        # cho chắc, không tốn gì).
+        if chain_id:
+            same_chain = [
+                p for p in pairs
+                if CHAIN_SLUG_MAP.get((p.get("chainId") or "").lower(), (None, None))[0] == str(chain_id)
+            ]
+            if same_chain:
+                pairs = same_chain
+
+        best = sorted(pairs, key=lambda x: float(x.get("liquidity", {}).get("usd", 0) or 0), reverse=True)[0]
+        c_id, c_name = CHAIN_SLUG_MAP.get((best.get("chainId") or "").lower(), (chain_id, None))
+
+        return {
+            "price_snapshot": float(best.get("priceUsd") or 0) or None,
+            "market_cap":     float(best.get("marketCap") or 0) or None,
+            "fdv":            float(best.get("fdv") or 0) or None,
+            "chain_id":       c_id,
+            "chain_name":     c_name,
+            "source":         "dexscreener_by_address",
+        }
+    except Exception as e:
+        print(f"[enricher] _from_dexscreener_by_address error: {e}")
+        return {}
+
+
+def _from_geckoterminal_by_address(contract_address: str, chain_id: str = None) -> dict:
+    """Fallback của _from_dexscreener_by_address — cùng nguyên tắc tra
+    theo địa chỉ, dùng khi DexScreener chưa index kịp pool này."""
+    network = CHAIN_ID_TO_GECKO_NETWORK.get(str(chain_id))
+    if not network or not contract_address:
+        return {}
+    try:
+        r = SESSION.get(
+            f"https://api.geckoterminal.com/api/v2/networks/{network}/tokens/{contract_address}",
+            headers={"Accept": "application/json;version=20230302"},
+            timeout=10
+        )
+        r.raise_for_status()
+        attr = (r.json().get("data") or {}).get("attributes") or {}
+        if not attr:
+            return {}
+        price = attr.get("price_usd")
+        mc    = attr.get("market_cap_usd")
+        fdv   = attr.get("fdv_usd")
+        return {
+            "price_snapshot": float(price) if price else None,
+            "market_cap":     float(mc) if mc else None,
+            "fdv":            float(fdv) if fdv else None,
+            "chain_id":       chain_id,
+            "chain_name":     CHAIN_NAMES.get(str(chain_id), chain_id),
+            "source":         "geckoterminal_by_address",
+        }
+    except Exception as e:
+        print(f"[enricher] _from_geckoterminal_by_address error: {e}")
+        return {}
+
+
+def _price_by_address(contract_address: str, chain_id: str = None) -> dict:
+    """Thử DexScreener trước, GeckoTerminal sau — cả 2 đều tra theo
+    ĐỊA CHỈ, không theo symbol, nên an toàn dùng cho token đã override."""
+    data = _from_dexscreener_by_address(contract_address, chain_id)
+    if data.get("price_snapshot"):
+        return data
+    data2 = _from_geckoterminal_by_address(contract_address, chain_id)
+    return data2 or data
+
+
 def enrich_token(symbol: str, project_name: str = None, allow_dex_fallback: bool = True) -> dict:
     """
     Main function: tìm contract + giá cho token.
-    Chạy pipeline tự động trước (_enrich_token_auto — đã sửa để search
-    đa chain, không còn giới hạn BSC), rồi áp override từ bảng
-    contract_overrides trên Supabase (nếu có entry cho symbol này) đè
-    lên contract_address/chain — dành cho case pre-TGE không có tín hiệu
-    on-chain nào để tự nhận diện. Giá/market cap/fdv vẫn giữ nguyên từ
-    nguồn tự động nếu tìm được.
+    Chạy pipeline tự động trước (_enrich_token_auto — search đa chain).
+    Nếu Binance Alpha CHƯA niêm yết chính thức VÀ có entry trong
+    contract_overrides, dùng contract đã verify + tra giá/market cap/fdv
+    LẠI TỪ ĐẦU theo đúng địa chỉ đó (_price_by_address) — KHÔNG giữ giá
+    tìm được theo symbol ở bước trên, vì bước đó vẫn có thể dính nhầm 1
+    pool trùng ticker khác dù contract đã đúng.
     """
     result = _enrich_token_auto(symbol, project_name, allow_dex_fallback)
 
@@ -415,21 +515,31 @@ def enrich_token(symbol: str, project_name: str = None, allow_dex_fallback: bool
     # token đã lên chính thức trên Binance Alpha token list (đủ cả
     # contract + giá — đây là nguồn tin cậy tuyệt đối), TỰ ĐỘNG bỏ qua
     # override và dùng thẳng data thật — không cần vào Supabase xoá tay
-    # dòng override. Nhờ vậy quy trình là: auto chạy bình thường → sai
-    # thì tự tra rồi SQL đè tạm → lúc Binance niêm yết chính thức, job
-    # 5 phút tự nhận ra và tự chuyển sang tin data official, khỏi cần
-    # dọn dẹp gì thêm.
+    # dòng override.
     is_official = result.get("source") == "binance_alpha" and result.get("contract_address")
 
     if not is_official:
         override = _get_manual_overrides().get((symbol or "").upper())
         if override:
-            result = dict(result) if result else {}
-            result["contract_address"] = override["contract_address"]
-            result["chain_id"]   = override.get("chain_id") or result.get("chain_id")
-            result["chain_name"] = override.get("chain_name") or result.get("chain_name")
-            result["source"] = (result.get("source") or "") + "+manual_override"
-            print(f"[enricher] {symbol} ✓ contract từ contract_overrides (Supabase, tạm — chưa niêm yết chính thức): {override['contract_address']}")
+            addr = override["contract_address"]
+            addr_chain = override.get("chain_id")
+            addr_data = _price_by_address(addr, addr_chain)
+
+            merged = {
+                "contract_address": addr,
+                "chain_id":         addr_chain or result.get("chain_id"),
+                "chain_name":       override.get("chain_name") or result.get("chain_name"),
+                "price_snapshot":   addr_data.get("price_snapshot"),
+                "market_cap":       addr_data.get("market_cap"),
+                "fdv":              addr_data.get("fdv"),
+            }
+            if addr_data.get("price_snapshot"):
+                merged["source"] = "manual_override+" + addr_data.get("source", "address_verified")
+                print(f"[enricher] {symbol} ✓ contract override + giá tra theo địa chỉ: ${addr_data['price_snapshot']}")
+            else:
+                merged["source"] = "manual_override+no_pool_yet"
+                print(f"[enricher] {symbol} - contract override áp dụng nhưng CHƯA có pool nào ở địa chỉ này để lấy giá (bình thường nếu chưa mở trading) — để trống giá thay vì tin nhầm giá theo symbol")
+            return merged
     else:
         print(f"[enricher] {symbol} ✓ đã niêm yết chính thức trên Binance Alpha — bỏ qua override, dùng data official")
 
