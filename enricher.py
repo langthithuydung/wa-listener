@@ -27,6 +27,21 @@ CHAIN_NAMES = {
     "501": "SOL", "42161": "ARB", "146": "SONIC",
 }
 
+# [MỚI] Map slug chain (GeckoTerminal/DexScreener dùng string, không phải
+# numeric id) → (chain_id, chain_name) chuẩn của hệ thống mình. Cần cái
+# này vì trước đây _from_geckoterminal/_from_dexscreener hardcode chỉ
+# tìm trên "bsc" — token ở Base/ETH/ARB/SOL... không bao giờ được tìm
+# thấy qua 2 nguồn này dù có pool thật (bug âm thầm, không throw lỗi gì
+# nên rất khó nhận ra khi debug).
+CHAIN_SLUG_MAP = {
+    "eth": ("1", "ETH"), "ethereum": ("1", "ETH"),
+    "bsc": ("56", "BSC"), "bnb": ("56", "BSC"), "bnb_smart_chain": ("56", "BSC"),
+    "base": ("8453", "Base"),
+    "solana": ("501", "SOL"), "sol": ("501", "SOL"),
+    "arbitrum": ("42161", "ARB"), "arbitrum_one": ("42161", "ARB"),
+    "sonic": ("146", "SONIC"),
+}
+
 # Cache token list để không gọi API liên tục
 _alpha_token_cache: dict = {}
 _alpha_cache_ts: float = 0
@@ -76,12 +91,27 @@ def _from_binance_alpha(symbol: str) -> dict:
 
 
 def _from_geckoterminal(symbol: str, project_name: str = None) -> dict:
-    """Tìm qua GeckoTerminal — free, không cần key."""
+    """
+    Tìm qua GeckoTerminal — free, không cần key.
+
+    [SỬA — BUG] Trước đây gọi API với `network: "bsc"` cứng → CHỈ BAO
+    GIỜ tìm trên BSC, token ở Base/ETH/ARB/SOL... luôn trả rỗng dù có
+    pool thật (không lỗi gì cả nên rất dễ bị coi nhầm là "GeckoTerminal
+    không có data" trong khi thực ra do tự giới hạn chain sai). Giờ bỏ
+    filter network để search TOÀN BỘ chain GeckoTerminal hỗ trợ, tự suy
+    ra đúng chain_id/chain_name từ chính pool khớp thay vì gán cứng.
+
+    [SỬA — AN TOÀN] Bỏ luôn fallback "lấy pools[0] nếu không có pool nào
+    khớp symbol" của bản cũ — đó chính là kiểu code dễ dính ticker
+    collision nhất (lấy đại kết quả đầu tiên dù sai token). Giờ CHỈ chấp
+    nhận pool khớp CHÍNH XÁC symbol; nếu không có → trả rỗng, để hàm
+    enrich_token() rơi xuống nguồn tiếp theo thay vì đoán bừa.
+    """
     query = project_name or symbol
     try:
         r = SESSION.get(
             "https://api.geckoterminal.com/api/v2/search/pools",
-            params={"query": query, "network": "bsc"},
+            params={"query": query},
             headers={"Accept": "application/json;version=20230302"},
             timeout=10
         )
@@ -90,25 +120,32 @@ def _from_geckoterminal(symbol: str, project_name: str = None) -> dict:
         if not pools:
             return {}
 
-        # Ưu tiên pool có tên khớp symbol
+        # Trong các pool khớp ĐÚNG symbol, chọn pool thanh khoản cao nhất
+        # (tránh chọn nhầm pool rác/pool giả mạo thanh khoản thấp).
         best = None
+        best_liq = -1.0
         for p in pools:
             attr = p.get("attributes", {})
-            rel  = p.get("relationships", {})
             base_sym = attr.get("name", "").split("/")[0].strip().upper()
-            if base_sym == symbol.upper():
-                best = p
-                break
+            if base_sym != symbol.upper():
+                continue
+            liq = float(attr.get("reserve_in_usd") or 0)
+            if liq > best_liq:
+                best, best_liq = p, liq
         if not best:
-            best = pools[0]
+            return {}
 
         attr = best.get("attributes", {})
-        # base token address từ relationships
-        base_addr = None
+        base_id = ""
         try:
-            base_addr = best["relationships"]["base_token"]["data"]["id"].split("_")[-1]
+            base_id = best["relationships"]["base_token"]["data"]["id"]
         except Exception:
             pass
+
+        network_slug, base_addr = "", None
+        if base_id and "_" in base_id:
+            network_slug, base_addr = base_id.split("_", 1)
+        chain_id, chain_name = CHAIN_SLUG_MAP.get(network_slug, ("56", "BSC"))
 
         price = attr.get("base_token_price_usd")
         mc    = attr.get("market_cap_usd")
@@ -119,8 +156,8 @@ def _from_geckoterminal(symbol: str, project_name: str = None) -> dict:
             "price_snapshot":   float(price) if price else None,
             "market_cap":       float(mc) if mc else None,
             "fdv":              float(fdv) if fdv else None,
-            "chain_id":         "56",
-            "chain_name":       "BSC",
+            "chain_id":         chain_id,
+            "chain_name":       chain_name,
             "source":           "geckoterminal",
         }
     except Exception as e:
@@ -129,7 +166,15 @@ def _from_geckoterminal(symbol: str, project_name: str = None) -> dict:
 
 
 def _from_dexscreener(symbol: str, project_name: str = None) -> dict:
-    """Fallback: DexScreener search."""
+    """
+    Fallback: DexScreener search.
+
+    [SỬA — BUG] Trước đây lọc cứng `chainId == "bsc"` → cùng loại bug với
+    GeckoTerminal ở trên, bỏ sót toàn bộ token ở chain khác BSC. Giờ xét
+    TẤT CẢ chain DexScreener trả về, vẫn giữ nguyên tắc CHỈ nhận pair
+    khớp CHÍNH XÁC symbol (bỏ fallback "pair BSC đầu tiên" cũ) để không
+    bắt nhầm ticker trùng tên ở chain khác nhau.
+    """
     query = project_name or symbol
     try:
         r = SESSION.get(
@@ -139,27 +184,24 @@ def _from_dexscreener(symbol: str, project_name: str = None) -> dict:
         r.raise_for_status()
         pairs = r.json().get("pairs", [])
 
-        # Lọc BSC, base token khớp symbol
-        bsc_pairs = [
+        exact = [
             p for p in pairs
-            if p.get("chainId") == "bsc"
-            and p.get("baseToken", {}).get("symbol", "").upper() == symbol.upper()
+            if p.get("baseToken", {}).get("symbol", "").upper() == symbol.upper()
         ]
-        if not bsc_pairs:
-            bsc_pairs = [p for p in pairs if p.get("chainId") == "bsc"]
-        if not bsc_pairs:
+        if not exact:
             return {}
 
-        best = sorted(bsc_pairs, key=lambda x: float(x.get("liquidity", {}).get("usd", 0) or 0), reverse=True)[0]
+        best = sorted(exact, key=lambda x: float(x.get("liquidity", {}).get("usd", 0) or 0), reverse=True)[0]
         bt = best.get("baseToken", {})
+        chain_id, chain_name = CHAIN_SLUG_MAP.get((best.get("chainId") or "").lower(), ("56", "BSC"))
 
         return {
             "contract_address": bt.get("address"),
             "price_snapshot":   float(best.get("priceUsd") or 0) or None,
             "market_cap":       float(best.get("marketCap") or 0) or None,
             "fdv":              float(best.get("fdv") or 0) or None,
-            "chain_id":         "56",
-            "chain_name":       "BSC",
+            "chain_id":         chain_id,
+            "chain_name":       chain_name,
             "source":           "dexscreener",
         }
     except Exception as e:
@@ -229,9 +271,12 @@ def _from_binance_web3_search(symbol: str, project_name: str = None) -> dict:
         return {}
 
 
-def enrich_token(symbol: str, project_name: str = None, allow_dex_fallback: bool = True) -> dict:
+def _enrich_token_auto(symbol: str, project_name: str = None, allow_dex_fallback: bool = True) -> dict:
     """
-    Main function: tìm contract + giá cho token.
+    Pipeline tự động (Binance Alpha → Web3 search → GeckoTerminal →
+    DexScreener). Gọi qua enrich_token() bên dưới — hàm đó áp thêm lớp
+    override từ Supabase (bảng contract_overrides) cho case pre-TGE
+    chưa có tín hiệu on-chain nào để tự nhận diện được.
     Trả về dict với các field để update Supabase.
 
     allow_dex_fallback: [MỚI] Khi False, CHỈ tin nguồn Binance Alpha official
@@ -297,6 +342,84 @@ def enrich_token(symbol: str, project_name: str = None, allow_dex_fallback: bool
 
     print(f"[enricher] {symbol} - not found anywhere")
     return {}
+
+
+# ── Override thủ công cho case KHÔNG THỂ tự động được ─────────────────
+# Token pre-TGE chưa có pool thanh khoản nào ở đâu hết thì không có tín
+# hiệu on-chain nào để phân biệt với token trùng ticker khác — không
+# GeckoTerminal/DexScreener/Web3 search nào đoán đúng được, dù đã sửa
+# hết bug hardcode BSC ở trên. Trường hợp này CHỈ giải quyết được bằng
+# tay (tra qua nguồn ngoài rồi tự nhập).
+#
+# Thay vì hardcode vào code (phải sửa file + deploy lại mỗi token), lưu
+# vào 1 bảng Supabase — set/sửa chỉ cần 1 câu INSERT/UPDATE SQL, không
+# cần đụng tới enricher.py hay deploy lại lần nào nữa, dùng được cho
+# hàng trăm token sau này y hệt nhau:
+#
+#   create table if not exists contract_overrides (
+#     symbol text primary key,
+#     contract_address text not null,
+#     chain_id text,
+#     chain_name text,
+#     note text,
+#     created_at timestamptz default now()
+#   );
+#
+#   insert into contract_overrides (symbol, contract_address, chain_id, chain_name, note)
+#   values ('QUID', '0x1a44233FAe8D50F1AeB3a5d58dd426ff4814Cb53', '8453', 'Base', 'pre-TGE, verified BaseScan 2026-08-04')
+#   on conflict (symbol) do update set
+#     contract_address = excluded.contract_address,
+#     chain_id = excluded.chain_id,
+#     chain_name = excluded.chain_name,
+#     note = excluded.note;
+#
+# Xoá dòng khỏi bảng khi token đã "live" ổn định trên Binance Alpha API
+# thật — lúc đó bước 1 tự lấy đúng, override không còn cần thiết nữa.
+_override_cache: dict = {}
+_override_cache_ts: float = 0
+OVERRIDE_CACHE_TTL = 60  # cache ngắn (1 phút) vì admin có thể sửa bảng này bất cứ lúc nào
+
+
+def _get_manual_overrides() -> dict:
+    global _override_cache, _override_cache_ts
+    now = time.time()
+    if now - _override_cache_ts < OVERRIDE_CACHE_TTL and _override_cache:
+        return _override_cache
+    try:
+        from supabase import create_client
+        supabase = create_client(os.environ["SUPABASE_URL"], os.environ["SUPABASE_KEY"])
+        rows = supabase.table("contract_overrides").select("*").execute().data
+        _override_cache = {r["symbol"].upper(): r for r in rows}
+        _override_cache_ts = now
+    except Exception as e:
+        # Bảng chưa tồn tại hoặc lỗi kết nối — không làm hỏng flow enrich
+        # bình thường, chỉ đơn giản là không có override nào áp dụng được.
+        print(f"[enricher] contract_overrides lookup skipped: {e}")
+    return _override_cache
+
+
+def enrich_token(symbol: str, project_name: str = None, allow_dex_fallback: bool = True) -> dict:
+    """
+    Main function: tìm contract + giá cho token.
+    Chạy pipeline tự động trước (_enrich_token_auto — đã sửa để search
+    đa chain, không còn giới hạn BSC), rồi áp override từ bảng
+    contract_overrides trên Supabase (nếu có entry cho symbol này) đè
+    lên contract_address/chain — dành cho case pre-TGE không có tín hiệu
+    on-chain nào để tự nhận diện. Giá/market cap/fdv vẫn giữ nguyên từ
+    nguồn tự động nếu tìm được.
+    """
+    result = _enrich_token_auto(symbol, project_name, allow_dex_fallback)
+
+    override = _get_manual_overrides().get((symbol or "").upper())
+    if override:
+        result = dict(result) if result else {}
+        result["contract_address"] = override["contract_address"]
+        result["chain_id"]   = override.get("chain_id") or result.get("chain_id")
+        result["chain_name"] = override.get("chain_name") or result.get("chain_name")
+        result["source"] = (result.get("source") or "") + "+manual_override"
+        print(f"[enricher] {symbol} ✓ contract từ contract_overrides (Supabase): {override['contract_address']}")
+
+    return result
 
 
 def compute_value_usd(amount_per_user, price_snapshot) -> float | None:
