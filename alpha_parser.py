@@ -55,6 +55,30 @@ def is_followup_campaign(text: str) -> bool:
     return any(sig in text_lower for sig in FOLLOWUP_CAMPAIGN_SIGNALS)
 
 
+# [MỚI] Tin "thông báo cách phân phối thưởng định kỳ cho holder hiện có"
+# (VD case thật: MarsCoin/SPCXB — "Binance Alpha would like to clarify
+# the reward distribution arrangements... using one random snapshot per
+# day... average monthly holding of at least 10,000 MarsCoin... Rewards
+# for the previous month will be distributed..."). Đây KHÔNG PHẢI sự
+# kiện claim airdrop mới bằng Alpha Points — không có points_threshold/
+# decay_rule/deadline thật, chỉ là thông báo cơ chế trả thưởng theo
+# holding hàng tháng. Text loại này thường KHÔNG chứa chữ "airdrop" nào
+# cả, nên khi thiếu field phải rơi xuống Gemini fallback, Gemini dễ tự
+# suy đoán nhầm event_type="airdrop" từ ngữ cảnh "reward distribution"
+# chung chung → tạo ra event rác kiểu id=13 (symbol "SPCXB" bị hallucinate,
+# points_threshold/amount_per_user đều null vì thực ra không có).
+HOLDING_REWARD_SIGNALS = [
+    "reward distribution arrangements",
+    "average monthly holding",
+    "one random snapshot per day",
+    "distribution facilitator",
+]
+
+def is_holding_reward_notice(text: str) -> bool:
+    text_lower = text.lower()
+    return any(sig in text_lower for sig in HOLDING_REWARD_SIGNALS)
+
+
 SYMBOL_BLACKLIST = {
     "UTC", "TGE", "AM", "PM", "GMT", "USD", "USDT", "USDC", "BNB",
     "CEO", "API", "URL", "FAQ", "TBA", "TBD", "ID", "VIP", "KYC",
@@ -437,6 +461,10 @@ def parse_message(text: str, msg_date=None) -> dict | None:
 
     if is_followup_campaign(text):
         print("[Parser] Bỏ qua: tin follow-up (Deposit/Transfer Campaign) của token ĐÃ airdrop rồi, không phải sự kiện claim mới")
+        return None
+
+    if is_holding_reward_notice(text):
+        print("[Parser] Bỏ qua: thông báo cơ chế trả thưởng định kỳ theo holding (không phải sự kiện claim Alpha Points mới)")
         return None
 
     result = parse_with_regex(text, msg_date=msg_date)
