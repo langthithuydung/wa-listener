@@ -98,6 +98,37 @@ def job_poll_announcements():
 
 
 # ── JOB 2: Enrich upcoming/pending events với giá + contract ─────────
+def _get_confirmed_blind_box_contract(supabase, alpha_event_id: int, symbol: str) -> dict | None:
+    """
+    Tra bảng blind_box_candidates cho đúng event + symbol này — dùng làm
+    nguồn ƯU TIÊN CAO NHẤT khi enrich contract cho token đó. Contract ở
+    đây đã được XÁC NHẬN qua on-chain thật (ví Binance Alpha Router thật
+    sự nhận đúng token này cho đúng event này) — đáng tin hơn hẳn tìm
+    theo symbol/ticker qua enrich_token() (dễ dính ticker collision).
+
+    Case thật đã xảy ra: event Alpha Box AGT+AIA — enrich theo symbol
+    "AIA" lấy NHẦM contract 0x48a18a47... của 1 token AIA khác, trong
+    khi blind_box_detect đã tự xác nhận đúng contract 0x53ec33cd... từ
+    trước đó (cả 2 ví router đều thấy, confidence 100%) nhưng job enrich
+    tokens_detail chưa từng tham khảo bảng này.
+    """
+    if not alpha_event_id or not symbol:
+        return None
+    try:
+        rows = supabase.table("blind_box_candidates") \
+            .select("contract_address, confidence_score, confirmed_both, in_alpha_list") \
+            .eq("alpha_event_id", alpha_event_id) \
+            .ilike("symbol", symbol) \
+            .order("confidence_score", desc=True) \
+            .limit(1) \
+            .execute().data
+        if rows and rows[0].get("contract_address"):
+            return rows[0]
+    except Exception as e:
+        print(f"[enrich] blind_box lookup error ({symbol}): {e}")
+    return None
+
+
 def job_enrich_prices():
     """
     Mỗi 5 phút: lấy tất cả upcoming + pending có symbol
@@ -144,6 +175,23 @@ def job_enrich_prices():
             allow_dex = row.get("status") not in ("upcoming", "pending")
             enriched = enrich_token(symbol, row.get("project_name"), allow_dex_fallback=allow_dex)
 
+            # [MỚI] Nếu blind_box_detect đã xác nhận contract cho đúng
+            # event + symbol này, ưu tiên dùng nó — ghi đè kết quả tìm
+            # theo symbol ở trên (xem docstring _get_confirmed_blind_box_contract).
+            blind_box_hit = _get_confirmed_blind_box_contract(supabase, row["id"], symbol)
+            if blind_box_hit:
+                from enricher import enrich_by_contract_address
+                addr_data = enrich_by_contract_address(blind_box_hit["contract_address"], row.get("chain_id"))
+                enriched = dict(enriched) if enriched else {}
+                enriched["contract_address"] = blind_box_hit["contract_address"]
+                if addr_data.get("price_snapshot"):
+                    enriched["price_snapshot"] = addr_data["price_snapshot"]
+                if addr_data.get("market_cap"):
+                    enriched["market_cap"] = addr_data["market_cap"]
+                if addr_data.get("fdv"):
+                    enriched["fdv"] = addr_data["fdv"]
+                print(f"[enrich] {symbol} ✓ contract từ blind_box_candidates (on-chain xác nhận, event #{row['id']}): {blind_box_hit['contract_address']}")
+
             update_data = {}
             val_usd = None
             if enriched:
@@ -184,8 +232,25 @@ def job_enrich_prices():
                     if not t_symbol:
                         new_tokens_detail.append(t)
                         continue
-                    t_enriched = enrich_token(t_symbol, None, allow_dex_fallback=allow_dex)
-                    time.sleep(0.4)  # tránh rate limit khi enrich nhiều token liên tiếp
+
+                    # [MỚI] Ưu tiên contract đã được blind_box_detect xác
+                    # nhận on-chain cho đúng event+symbol này, thay vì tin
+                    # thẳng kết quả tìm theo symbol (dễ dính ticker
+                    # collision — case AIA thật đã xảy ra, xem docstring
+                    # _get_confirmed_blind_box_contract ở trên).
+                    blind_box_hit = _get_confirmed_blind_box_contract(supabase, row["id"], t_symbol)
+                    if blind_box_hit:
+                        from enricher import enrich_by_contract_address
+                        addr_data = enrich_by_contract_address(blind_box_hit["contract_address"], row.get("chain_id"))
+                        t_enriched = {
+                            "contract_address": blind_box_hit["contract_address"],
+                            "price_snapshot": addr_data.get("price_snapshot"),
+                        }
+                        print(f"[enrich] {t_symbol} (sub-token) ✓ contract từ blind_box_candidates: {blind_box_hit['contract_address']}")
+                    else:
+                        t_enriched = enrich_token(t_symbol, None, allow_dex_fallback=allow_dex)
+                        time.sleep(0.4)  # tránh rate limit khi enrich nhiều token liên tiếp
+
                     t_updated = dict(t)  # copy, giữ nguyên tier_common/tier_rare/tier_super_rare
                     if t_enriched:
                         t_price = t_enriched.get("price_snapshot")

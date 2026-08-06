@@ -547,6 +547,17 @@ def enrich_token(symbol: str, project_name: str = None, allow_dex_fallback: bool
 
 
 # ── Verify contract thủ công (dùng cho endpoint /admin/set-contract) ──
+def enrich_by_contract_address(contract_address: str, chain_id: str = None) -> dict:
+    """
+    API công khai (khác _price_by_address ở chỗ đặt tên rõ ràng cho nơi
+    gọi từ module khác): enrich giá/market cap/fdv theo ĐỊA CHỈ contract
+    đã biết chắc chắn — dùng khi có nguồn xác nhận khác đáng tin (VD
+    blind_box_candidates đã xác nhận qua on-chain) thay vì tìm theo
+    symbol/ticker dễ dính collision.
+    """
+    return _price_by_address(contract_address, chain_id)
+
+
 def verify_contract_on_binance_web3(symbol: str, contract_address: str) -> dict:
     """
     Xác nhận 1 địa chỉ contract có THẬT trên hệ thống của Binance hay
