@@ -260,6 +260,24 @@ def run_blindbox():
 
 
 # ── Test endpoint ─────────────────────────────────────
+@app.get("/admin/remove-event")
+def admin_remove_event(msg_id: int):
+    """
+    Xoá HẲN 1 event khỏi mọi nơi — Supabase (alpha_events) + all.json +
+    history.json trên R2. Dùng khi 1 event bị nhận nhầm loại (VD "Trading
+    Competition" bị parser cũ nhận nhầm thành airdrop) và cần dọn sạch,
+    kể cả khi nó đã "ended" và lọt vào history.json rồi.
+
+        GET /admin/remove-event?msg_id=8812
+
+    msg_id lấy từ field source_msg_id của event đó (xem trong Supabase
+    hoặc trong chính JSON trên R2).
+    """
+    from storage import remove_event_by_msg_id
+    result = remove_event_by_msg_id(msg_id)
+    return {"success": True, **result}
+
+
 @app.get("/admin/set-contract")
 def admin_set_contract(symbol: str, contract: str):
     """

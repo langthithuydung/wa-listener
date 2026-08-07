@@ -496,8 +496,123 @@ def _append_ended_to_history(ended_events: list):
         print(f"[storage] Append history error: {e}")
 
 
+# ── Xoá HẲN 1 event khỏi mọi nơi (dùng cho /admin/remove-event) ──────
+def remove_event_by_msg_id(source_msg_id: int) -> dict:
+    """
+    [MỚI] Xoá 1 event khỏi TOÀN BỘ nơi lưu — không chỉ Supabase.
+
+    LÝ DO CẦN HÀM NÀY: _upsert_ended_to_all_events() và
+    _append_ended_to_history() ở trên CHỈ CÓ upsert/update, hoàn toàn
+    KHÔNG CÓ logic xoá. Nên nếu chỉ xoá dòng trong Supabase (DELETE FROM
+    alpha_events), event rác vẫn còn NGUYÊN VẸN trong all.json VÀ
+    history.json trên R2 mãi mãi — vì 2 file đó chỉ được đồng bộ khi có
+    event trùng source_msg_id để cập nhật field, không có khái niệm "dòng
+    này đã bị xoá bên Supabase, gỡ nó ra". Case thật đã xảy ra: 1 tin
+    "Trading Competition" bị parser cũ nhận nhầm thành airdrop, xoá ở
+    Supabase xong vẫn thấy trùng trong history.json.
+
+    Xoá theo source_msg_id (mỗi tin Telegram/API chỉ có 1 msg_id duy
+    nhất, dùng để chống trùng xuyên suốt hệ thống — nhất quán với cách
+    _upsert_ended_to_all_events/_append_ended_to_history định danh event).
+    """
+    result = {
+        "supabase_deleted": False,
+        "all_json_removed": False,
+        "history_json_removed": False,
+    }
+
+    try:
+        resp = supabase.table("alpha_events").delete().eq("source_msg_id", source_msg_id).execute()
+        result["supabase_deleted"] = True
+        result["supabase_rows_deleted"] = len(resp.data or [])
+    except Exception as e:
+        result["supabase_error"] = str(e)
+
+    try:
+        r2 = get_r2_client()
+    except Exception as e:
+        result["r2_error"] = str(e)
+        return result
+
+    for key, result_key in (
+        ("alpha-events/all.json", "all_json_removed"),
+        ("alpha-events/history.json", "history_json_removed"),
+    ):
+        try:
+            obj = r2.get_object(Bucket=BUCKET, Key=key)
+            data = json.loads(obj["Body"].read())
+            if not isinstance(data, list):
+                continue
+            before = len(data)
+            data = [e for e in data if e.get("source_msg_id") != source_msg_id]
+            if len(data) < before:
+                r2.put_object(
+                    Bucket=BUCKET,
+                    Key=key,
+                    Body=json.dumps(data, default=str, ensure_ascii=False).encode("utf-8"),
+                    ContentType="application/json",
+                    CacheControl="max-age=60",
+                )
+                result[result_key] = True
+        except Exception as e:
+            result[f"{result_key}_error"] = str(e)
+
+    return result
+
+
 # ── Ghi snapshot JSON lên R2 ─────────────────────────
 def refresh_r2_snapshot():
+    try:
+        r2 = get_r2_client()
+        all_events = supabase.table("alpha_events") \
+            .select("*") \
+            .order("created_at", desc=True) \
+            .execute().data
+
+        pending  = [e for e in all_events if e["status"] == "pending"]
+        upcoming = [e for e in all_events if e["status"] == "upcoming"]
+        live     = [e for e in all_events if e["status"] == "live"]
+        ended    = [e for e in all_events if e["status"] == "ended"]
+
+        # Blind box candidates — sort by confidence_score
+        try:
+            candidates = supabase.table("blind_box_candidates") \
+                .select("*") \
+                .eq("status", "candidate") \
+                .order("confidence_score", desc=True) \
+                .execute().data
+        except Exception:
+            candidates = []
+
+        files = {
+            "alpha-events/pending.json":    pending,
+            "alpha-events/upcoming.json":   upcoming,
+            "alpha-events/live.json":       live,
+            "alpha-events/blindbox.json":   candidates,
+        }
+
+        def put(key, data):
+            r2.put_object(
+                Bucket=BUCKET,
+                Key=key,
+                Body=json.dumps(data, default=str, ensure_ascii=False,
+                                separators=(',', ':')).encode('utf-8'),
+                ContentType='application/json',
+                CacheControl='max-age=60'
+            )
+
+        for key, data in files.items():
+            put(key, data)
+
+        # Tự động merge event vừa 'ended' vào history.json — thay thế hoàn
+        # toàn việc phải chạy tay sync_alpha_history.py mỗi khi có sự kiện mới.
+        _upsert_ended_to_all_events(ended)
+        _append_ended_to_history(ended)
+
+        print(f"[storage] R2 updated — pending={len(pending)}, upcoming={len(upcoming)}, live={len(live)}, ended_synced={len(ended)}, blindbox={len(candidates)} ✓")
+
+    except Exception as e:
+        print(f"[storage] R2 error: {e}")
     try:
         r2 = get_r2_client()
         all_events = supabase.table("alpha_events") \
